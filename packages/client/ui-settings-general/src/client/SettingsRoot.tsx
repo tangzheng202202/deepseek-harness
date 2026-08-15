@@ -24,6 +24,17 @@ function navIcon(id: string) {
   if (id === 'models') return <IconDataOutline16 className={css.navIcon} size={16} />
   if (id === 'agent-presets') return <IconAgentPresetOutline16 className={css.navIcon} size={16} />
   if (id === 'plugins') return <IconPersonalizationOutline16 className={css.navIcon} size={16} />
+  if (id === 'voice') {
+    return (
+      <svg className={css.navIcon} viewBox="0 0 16 16" width="16" height="16" fill="none"
+        stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <rect x="5.5" y="2.5" width="5" height="7" rx="2.5" />
+        <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0" />
+        <path d="M8 11.5V14" />
+        <path d="M5.5 14h5" />
+      </svg>
+    )
+  }
   return <IconSettingsOutline16 className={css.navIcon} size={16} />
 }
 
