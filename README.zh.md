@@ -34,6 +34,10 @@ pnpm run build
 pnpm dsh web
 ```
 
+## 语音交互（实验性）
+
+Web UI 内置了实验性的**实时语音交互**功能：对智能体说话，它以语音回复。它使用火山引擎（豆包）流式 ASR + seed-tts-2.0 TTS，以当前 DeepSeek 智能体作为大脑。部署方式（本地 WebSocket 后端 + 你自己的 API Key）：[examples/voice-pipeline/README.md](examples/voice-pipeline/README.md)。
+
 ## 社区与支持
 
 - 欢迎通过 [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions) 提交反馈或 bug 报告。

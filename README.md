@@ -34,6 +34,10 @@ pnpm run build
 pnpm dsh web
 ```
 
+## Voice interaction (experimental)
+
+The Web UI ships an experimental **real-time voice interaction** feature: speak to the agent and it replies by voice. It uses Volcengine (Doubao) streaming ASR + seed-tts-2.0 TTS, with the current DeepSeek agent as the brain. Setup (a local WebSocket backend + your own API key): [examples/voice-pipeline/README.md](examples/voice-pipeline/README.md).
+
 ## Community and support
 
 - Feel free to submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).
