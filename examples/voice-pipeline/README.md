@@ -23,7 +23,7 @@
 ## 启动
 
 ```bash
-cd voice-pipeline
+cd examples/voice-pipeline
 
 # 1) 建虚拟环境并安装（只需一次）
 python3 -m venv .venv
