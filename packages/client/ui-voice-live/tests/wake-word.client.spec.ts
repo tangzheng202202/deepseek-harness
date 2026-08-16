@@ -2,7 +2,7 @@
 /** 唤醒词检测器：Web Speech API 实现的行为。 */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { createWakeWordDetector, WebSpeechWakeWord } from '../src/client/wake-word.ts'
+import { createWakeWordDetector, isSpeechRecognitionAvailable, WebSpeechWakeWord } from '../src/client/wake-word.ts'
 
 /** 可编程 SpeechRecognition fake（模块级共享，测试可触发其结果）。 */
 let lastRec: FakeRecognition | null = null
@@ -78,6 +78,30 @@ describe('WebSpeechWakeWord', () => {
     const ok = await det.start()
     expect(ok).toBe(false)
     expect(det.active).toBe(false)
+  })
+
+  it('onerror 记录失败原因（供设置页诊断，如 Chrome 国内 network）', async () => {
+    installSpeech(true)
+    const det = new WebSpeechWakeWord('你好', vi.fn())
+    const ok = await det.start()
+    expect(ok).toBe(true)
+    lastRec?.onerror?.({ error: 'network' })
+    expect(det.lastError).toBe('network')
+    det.stop()
+  })
+
+  it('API 缺失时 lastError 记录原因', async () => {
+    const det = new WebSpeechWakeWord('你好', vi.fn())
+    const ok = await det.start()
+    expect(ok).toBe(false)
+    expect(det.lastError).not.toBe('')
+  })
+
+  it('isSpeechRecognitionAvailable 反映构造器存在性', () => {
+    installSpeech(false)
+    expect(isSpeechRecognitionAvailable()).toBe(false)
+    installSpeech(true)
+    expect(isSpeechRecognitionAvailable()).toBe(true)
   })
 
   it('createWakeWordDetector 工厂返回 Web Speech 实现', () => {

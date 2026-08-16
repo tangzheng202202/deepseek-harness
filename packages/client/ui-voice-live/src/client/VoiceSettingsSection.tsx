@@ -11,6 +11,7 @@ import {
   previewVoice, type PreviewResult, PROVIDERS, setActiveProvider, setActiveVoice,
   setReplyFirst, setWakeWord, setWakeWordEnabled, VOICE_OPTIONS,
 } from './usePipelineVoice.ts'
+import { isSpeechRecognitionAvailable, WebSpeechWakeWord } from './wake-word.ts'
 import css from './VoiceSettingsSection.module.css'
 
 export type VoiceSettingsSectionProps =
@@ -27,6 +28,9 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
   /** echo 受控测试探针：浏览器是否真的对麦克风应用了 AEC。 */
   const [aecState, setAecState] = useState<string | null>(null)
   const [aecProbing, setAecProbing] = useState(false)
+  /** 唤醒可用性诊断：浏览器是否真的能跑 Web Speech 识别（Chrome 国内网络常见 network 失败）。 */
+  const [wakeDiag, setWakeDiag] = useState<string | null>(null)
+  const [wakeProbing, setWakeProbing] = useState(false)
 
   const preview = (): void => {
     setPreviewing(true)
@@ -50,6 +54,33 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
       setAecState(t('voice.aecUnavailable'))
     } finally {
       setAecProbing(false)
+    }
+  }
+
+  /** 唤醒可用性探针：短暂启动一次识别并读取失败原因（不长期占用麦克风）。 */
+  const probeWake = async (): Promise<void> => {
+    setWakeProbing(true)
+    setWakeDiag(null)
+    try {
+      if (!isSpeechRecognitionAvailable()) {
+        setWakeDiag(t('voice.wakeUnsupported'))
+        return
+      }
+      const det = new WebSpeechWakeWord(getWakeWord(), () => {})
+      const ok = await det.start()
+      if (!ok) {
+        setWakeDiag(det.lastError || t('voice.wakeUnavailable'))
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 1500))
+      if (det.lastError) {
+        setWakeDiag(`${t('voice.wakeError')}: ${det.lastError}`)
+      } else {
+        setWakeDiag(t('voice.wakeOk'))
+      }
+      det.stop()
+    } finally {
+      setWakeProbing(false)
     }
   }
 
@@ -122,6 +153,23 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
             maxLength={20}
             onChange={(e) => { setWakeWordState(e.target.value); setWakeWord(e.target.value) }}
           />
+        </div>
+      )}
+      {wakeEnabled && (
+        <div className={css.field}>
+          <span className={css.label}>{t('voice.wakeProbe')}</span>
+          <div className={css.voiceRow}>
+            <button
+              type="button"
+              className={css.previewButton}
+              disabled={wakeProbing}
+              onClick={() => { void probeWake() }}
+            >
+              {wakeProbing ? t('voice.wakeProbeBusy') : t('voice.wakeProbe')}
+            </button>
+            {wakeDiag !== null && <span className={css.aecResult}>{wakeDiag}</span>}
+          </div>
+          <p className={css.hint}>{t('voice.wakeNetworkHint')}</p>
         </div>
       )}
 

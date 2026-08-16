@@ -27,6 +27,13 @@ const t = (key: string): string => ({
   'voice.aecProbeAction': '检测',
   'voice.aecOn': '浏览器已对麦克风应用回声消除',
   'voice.aecUnavailable': '无法访问麦克风',
+  'voice.wakeProbe': '检测唤醒',
+  'voice.wakeProbeBusy': '检测中…',
+  'voice.wakeUnsupported': '当前浏览器不支持 Web Speech 语音识别',
+  'voice.wakeOk': '浏览器语音识别可用',
+  'voice.wakeError': '语音识别出错',
+  'voice.wakeUnavailable': '语音识别无法启动',
+  'voice.wakeNetworkHint': 'Chrome 依赖 Google 语音服务',
 }[key] ?? key)
 
 describe('VoiceSettingsSection', () => {
@@ -83,6 +90,77 @@ describe('VoiceSettingsSection 唤醒词', () => {
     expect(input).not.toBeNull()
     fireEvent.change(input, { target: { value: '小戴小戴' } })
     expect(localStorage.getItem('dsh-voice-wakeword')).toBe('小戴小戴')
+  })
+
+  it('唤醒可用性探针：jsdom 无 SpeechRecognition → 提示浏览器不支持', async () => {
+    const w = window as unknown as Record<string, unknown>
+    delete w.SpeechRecognition
+    delete w.webkitSpeechRecognition
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const checkboxes = view.container.querySelectorAll('input[type="checkbox"]')
+    fireEvent.click(checkboxes[1]!) // 开启唤醒 → 显示探针
+    const probe = Array.from(view.container.querySelectorAll('button')).find(b => b.textContent === '检测唤醒')!
+    expect(probe).toBeTruthy()
+    fireEvent.click(probe)
+    await act(async () => {})
+    expect(view.container.textContent).toContain('当前浏览器不支持 Web Speech 语音识别')
+  })
+
+  it('唤醒可用性探针：构造器存在时短暂启动并报告可用', async () => {
+    class FakeRecognition {
+      onerror: ((e: { error: string }) => void) | null = null
+      onresult: (() => void) | null = null
+      start(): void {}
+      abort(): void {}
+    }
+    const w = window as unknown as Record<string, unknown>
+    w.SpeechRecognition = FakeRecognition
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const checkboxes = view.container.querySelectorAll('input[type="checkbox"]')
+    fireEvent.click(checkboxes[1]!)
+    const probe = Array.from(view.container.querySelectorAll('button')).find(b => b.textContent === '检测唤醒')!
+    fireEvent.click(probe)
+    await act(async () => { await new Promise(r => setTimeout(r, 1600)) })
+    expect(view.container.textContent).toContain('浏览器语音识别可用')
+  })
+
+  it('唤醒可用性探针：start 抛错（权限拒绝）→ 显示具体原因', async () => {
+    class ThrowingRecognition {
+      onerror: ((e: { error: string }) => void) | null = null
+      onresult: (() => void) | null = null
+      start(): void { throw new Error('not allowed') }
+      abort(): void {}
+    }
+    const w = window as unknown as Record<string, unknown>
+    w.SpeechRecognition = ThrowingRecognition
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const checkboxes = view.container.querySelectorAll('input[type="checkbox"]')
+    fireEvent.click(checkboxes[1]!)
+    const probe = Array.from(view.container.querySelectorAll('button')).find(b => b.textContent === '检测唤醒')!
+    fireEvent.click(probe)
+    await act(async () => {})
+    expect(view.container.textContent).toContain('not allowed')
+  })
+
+  it('唤醒可用性探针：识别联网失败（network）→ 显示错误原因', async () => {
+    class NetworkFailRecognition {
+      onerror: ((e: { error: string }) => void) | null = null
+      onresult: (() => void) | null = null
+      start(): void {
+        // Chrome 国内网络：start 成功后立即报 network 错误
+        this.onerror?.({ error: 'network' })
+      }
+      abort(): void {}
+    }
+    const w = window as unknown as Record<string, unknown>
+    w.SpeechRecognition = NetworkFailRecognition
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const checkboxes = view.container.querySelectorAll('input[type="checkbox"]')
+    fireEvent.click(checkboxes[1]!)
+    const probe = Array.from(view.container.querySelectorAll('button')).find(b => b.textContent === '检测唤醒')!
+    fireEvent.click(probe)
+    await act(async () => { await new Promise(r => setTimeout(r, 1600)) })
+    expect(view.container.textContent).toContain('语音识别出错: network')
   })
 })
 

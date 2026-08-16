@@ -47,10 +47,17 @@ function speechRecognitionCtor(): SpeechRecognitionCtor | null {
   return window.SpeechRecognition ?? window.webkitSpeechRecognition ?? null
 }
 
+/** 浏览器语音识别是否可用（构造器存在即视为 API 可用，实际联网结果以 start 为准）。 */
+export function isSpeechRecognitionAvailable(): boolean {
+  return speechRecognitionCtor() !== null
+}
+
 /** Web Speech API 实现的唤醒词检测器。 */
 export class WebSpeechWakeWord implements WakeWordDetector {
   private recognition: InstanceType<SpeechRecognitionCtor> | null = null
   private _active = false
+  /** 最近一次 start/onerror 的失败原因（空字符串 = 无错误）。 */
+  lastError = ''
 
   constructor(
     private readonly keyword: string,
@@ -63,8 +70,12 @@ export class WebSpeechWakeWord implements WakeWordDetector {
 
   /** 同步配置 + 启动；接口要求返回 Promise<boolean>，显式包装避免 async 空转。 */
   start(): Promise<boolean> {
+    this.lastError = ''
     const Ctor = speechRecognitionCtor()
-    if (Ctor === null) return Promise.resolve(false)
+    if (Ctor === null) {
+      this.lastError = 'SpeechRecognition API 不存在'
+      return Promise.resolve(false)
+    }
     const rec = new Ctor()
     rec.continuous = true
     rec.interimResults = false
@@ -75,15 +86,18 @@ export class WebSpeechWakeWord implements WakeWordDetector {
         if (text.includes(this.keyword)) this.onWake()
       }
     }
-    // 静默错误：不支持/被拒绝时不打扰（设置页会提示开关未生效）。
-    rec.onerror = () => { /* swallow */ }
+    // 不静默：记录失败原因，供设置页诊断显示（Chrome 国内网络常报 network）。
+    rec.onerror = (event) => {
+      this.lastError = event.error || 'unknown'
+    }
     this.recognition = rec
     try {
       rec.start()
       this._active = true
       return Promise.resolve(true)
-    } catch {
+    } catch (error) {
       this.recognition = null
+      this.lastError = (error as Error).message || 'start() threw'
       return Promise.resolve(false)
     }
   }
