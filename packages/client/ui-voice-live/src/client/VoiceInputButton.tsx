@@ -4,11 +4,13 @@
  * into the draft and submits; no private InputBar keyboard face is touched.
  *
  * 生命周期交给 VoiceController（React 外部状态机），组件只读状态、转发
- * start/stop 动作，不再扫描 DOM、不再持有播放队列。
+ * start/stop 动作，并订阅会话回复流：语音发起回合的 agent 回复文本增量
+ * 经 pushReplyText 推给后端合成朗读；回合结束 flush + 关闭。
  */
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PartialAssistant } from '@deepseek-ai/dsh-client-runtime/client'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { VoiceController, type VoiceState } from './VoiceController.ts'
 import css from './VoiceInputButton.module.css'
@@ -21,10 +23,24 @@ const ACTIVE_STATES: ReadonlySet<VoiceState> = new Set([
   'synthesizing', 'playing', 'interrupting', 'reconnecting',
 ])
 
-export function VoiceInputButton({ inputActions, t }: VoiceInputButtonProps) {
+/** 回复朗读只取正文（text block），跳过 reasoning（思考）与工具块。 */
+function replyTextOf(p: PartialAssistant | null): string {
+  if (p === null) return ''
+  let out = ''
+  for (const b of p.blocks) {
+    if (b.kind === 'text' && typeof b.text === 'string') out += b.text
+  }
+  return out
+}
+
+export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButtonProps) {
   const [state, setState] = useState<VoiceState>('idle')
   const [error, setError] = useState<string | null>(null)
   const controllerRef = useRef<VoiceController | null>(null)
+  /** 当前回合是否由语音发起（决定是否朗读回复）。 */
+  const voiceTurnRef = useRef(false)
+  /** 已朗读的回复文本长度水位（增量去重）。 */
+  const spokenLenRef = useRef(0)
 
   const controller = (): VoiceController => {
     if (controllerRef.current === null) {
@@ -32,6 +48,7 @@ export function VoiceInputButton({ inputActions, t }: VoiceInputButtonProps) {
         onState: setState,
         onPartial: (text) => { inputActions.setDraft(text) },
         onFinal: (text) => {
+          voiceTurnRef.current = true // 语音发起回合：回复要朗读
           inputActions.setDraft(text)
           inputActions.submit()
         },
@@ -41,12 +58,38 @@ export function VoiceInputButton({ inputActions, t }: VoiceInputButtonProps) {
     return controllerRef.current
   }
 
-  const active = ACTIVE_STATES.has(state)
-  const tooltip = error ?? (active ? t('voice.micActive') : t('voice.mic'))
+  const running = useSession(s => s.running) ?? false
+  const partial = useSession(s => s.partial) ?? null
+
+  // 回复朗读：语音回合内，把 partial 正文增量推给后端合成。
+  useEffect(() => {
+    const c = controllerRef.current
+    if (c === null) return
+    if (!running) {
+      // 回合结束：flush 尾巴并结束应答模式（播放完即关闭连接）。
+      if (voiceTurnRef.current) {
+        c.flushReply()
+        c.endReply()
+        voiceTurnRef.current = false
+        spokenLenRef.current = 0
+      }
+      return
+    }
+    if (!voiceTurnRef.current) return
+    const text = replyTextOf(partial)
+    if (text.length < spokenLenRef.current) spokenLenRef.current = 0 // 流回退（罕见）：重头
+    if (text.length > spokenLenRef.current) {
+      c.pushReplyText(text.slice(spokenLenRef.current))
+      spokenLenRef.current = text.length
+    }
+  }, [running, partial])
 
   useEffect(() => () => {
     controllerRef.current?.cancel()
   }, [])
+
+  const active = ACTIVE_STATES.has(state)
+  const tooltip = error ?? (active ? t('voice.micActive') : t('voice.mic'))
 
   return (
     <Tooltip label={tooltip} side="top" delayMs={500}>

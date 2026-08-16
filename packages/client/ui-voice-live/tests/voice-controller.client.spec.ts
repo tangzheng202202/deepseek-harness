@@ -234,11 +234,13 @@ describe('ABA：30x start/stop', () => {
       expect(ws.sent.at(-1)).toBeInstanceOf(Int16Array)
 
       c.stop()
-      // stop 后 host 返回最终结果 → 提交并关闭
+      // stop 后 host 返回最终结果 → 提交并进入应答模式
       ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: `第${i}句` }))
 
       expect(cb.onFinal).toHaveBeenCalledTimes(i + 1)
       expect(cb.onFinal).toHaveBeenLastCalledWith(`第${i}句`)
+      // 回合结束（无回复朗读内容）→ 播放空闲即关闭
+      c.endReply()
       expect(FakeWS.alive.length).toBe(0)
       expect(FakeAudioContext.alive.length).toBe(0)
       expect(allTracks().every(t => t.stopped)).toBe(true)
@@ -289,6 +291,8 @@ describe('stop at each await point', () => {
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '完整' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(1)
     expect(cb.onFinal).toHaveBeenCalledWith('完整')
+    // 提交后进入应答模式（等待回复朗读）；回合结束无朗读内容 → 立即关闭
+    c.endReply()
     expect(FakeWS.alive.length).toBe(0)
   })
 })
@@ -342,6 +346,8 @@ describe('TTS：播放仅在完成事件后', () => {
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '好的' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(1)
+    c.endReply() // 回合结束，无朗读内容 → 关闭
+    expect(FakeWS.alive.length).toBe(0)
     // 再来一轮：mic / 连接恢复
     const ws2 = await startReady(c)
     expect(FakeWS.alive.length).toBe(1)
@@ -349,7 +355,85 @@ describe('TTS：播放仅在完成事件后', () => {
     c.stop()
     ws2.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '再见' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(2)
+    c.endReply()
     expect(FakeWS.alive.length).toBe(0)
+  })
+})
+
+describe('回复朗读（应答模式）', () => {
+  it('完整链路：stop→提交→pushReplyText→tts 播放→endReply 后播放完关闭', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '帮我查一下' }))
+    expect(cb.onFinal).toHaveBeenCalledTimes(1)
+    // 进入应答模式：连接保持，回复文本可推送
+    c.pushReplyText('好的，我来查。')
+    const push = ws.sent.find(s => typeof s === 'string' && s.includes('tts_push'))
+    expect(push).toBeDefined()
+    // host 合成回复：tts_start → 音频 → tts_done → 播放
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: '好的，我来查。' }))
+    ws.__msg(new ArrayBuffer(16))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+    expect(FakeAudio.instances.length).toBe(1)
+    const a = FakeAudio.instances[0]
+    expect(a?.playing).toBe(true)
+    // 回合结束：播放中不关闭
+    c.endReply()
+    expect(FakeWS.alive.length).toBe(1)
+    // 播放完成 → 空闲 → 关闭
+    a?.__end()
+    expect(FakeWS.alive.length).toBe(0)
+    expect(FakeAudioContext.alive.length).toBe(0)
+  })
+
+  it('自动断句（listening 中 final）：提交并进入应答模式，可朗读回复', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    // 服务端端点检测自动断句：listening 中收到 final（未按停止）
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '你好' }))
+    expect(cb.onFinal).toHaveBeenCalledTimes(1)
+    expect(FakeWS.alive.length).toBe(1) // 连接保持（应答模式）
+    // 回复朗读可用
+    c.pushReplyText('你好！')
+    expect(ws.sent.some(s => typeof s === 'string' && s.includes('tts_push'))).toBe(true)
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: '你好！' }))
+    ws.__msg(new ArrayBuffer(16))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+    c.endReply()
+    expect(FakeWS.alive.length).toBe(1)
+    FakeAudio.instances[0]?.__end()
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('应答模式中再次 start → 复用连接（不新建）', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '第一句' }))
+    expect(FakeWS.alive.length).toBe(1)
+    // 回复朗读中再次点 mic：复用同一连接（不再 open/ready）
+    await c.start()
+    expect(FakeWS.instances.length).toBe(1) // 没有新建连接
+    expect(FakeWS.alive.length).toBe(1)
+    // 复用后消息按当前代次处理：回复 TTS 正常
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: '回复' }))
+    ws.__msg(new ArrayBuffer(8))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+    expect(FakeAudio.instances.length).toBe(1)
+    expect(cb.onFinal).toHaveBeenCalledTimes(1)
+  })
+
+  it('非语音回合（endReply 已调用）不再朗读', async () => {
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: 'x' }))
+    c.endReply() // 回合结束 → 关闭
+    expect(FakeWS.alive.length).toBe(0)
+    // 迟到的回复文本不再推送（连接已关，静默）
+    c.pushReplyText('不该朗读')
+    expect(ws.sent.some(s => typeof s === 'string' && s.includes('tts_push'))).toBe(false)
   })
 })
 
@@ -360,9 +444,10 @@ describe('无泄漏', () => {
     const ws = await startReady(c)
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: 'x' }))
+    c.endReply() // 回合结束：停止应答超时 timer、关闭连接
     expect(FakeWS.alive.length).toBe(0)
     expect(FakeAudioContext.alive.length).toBe(0)
-    // 所有 timer（connect 超时 / stop 超时）都已清理
+    // 所有 timer（connect 超时 / stop 超时 / 应答超时）都已清理
     expect(vi.getTimerCount()).toBe(0)
   })
 

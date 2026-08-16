@@ -85,11 +85,15 @@ class VoiceSession {
 
   feedAudio(pcm: Buffer): void {
     if (this.ttsActive) return // 朗读期硬门控
+    const hasEnergy = hasVoiceEnergy(pcm)
     if (this.currentUt === null) {
-      if (!hasVoiceEnergy(pcm)) return // 静音不启动，能量仅作提示
+      if (!hasEnergy) return // 静音不启动，能量仅作提示
       this.startUtterance()
     }
-    this.currentUt?.push(pcm)
+    // 低能量帧显式置零：麦克风底噪会掩盖真实静音，服务端端点检测
+    // （end_window_size）靠连续静音断句——把“听到的静音”转成显式
+    // 零帧推给服务端。句界仍完全由服务端判定，客户端不做句界。
+    this.currentUt?.push(hasEnergy ? pcm : Buffer.alloc(pcm.length))
   }
 
   private startUtterance(): void {
@@ -98,7 +102,12 @@ class VoiceSession {
     const ut = new AsrUtterance(
       this.apiKey,
       id,
-      text => this.send({ type: 'asr_final', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq }),
+      (text) => {
+        // 服务端断句（definite final）即一轮结束：清空 currentUt，
+        // 下一帧有能量时启动新一轮，支持连续多轮对话。
+        if (this.currentUt === ut) this.currentUt = null
+        this.send({ type: 'asr_final', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq })
+      },
       text => this.send({ type: 'asr_partial', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq }),
       (err) => {
         if (this.currentUt === ut) this.currentUt = null
