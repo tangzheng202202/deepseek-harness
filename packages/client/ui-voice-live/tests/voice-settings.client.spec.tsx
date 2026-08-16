@@ -24,6 +24,9 @@ const t = (key: string): string => ({
   'voice.voice': '音色',
   'voice.hint': '说明',
   'voice.backendKeyHint': '后端密钥说明',
+  'voice.aecProbeAction': '检测',
+  'voice.aecOn': '浏览器已对麦克风应用回声消除',
+  'voice.aecUnavailable': '无法访问麦克风',
 }[key] ?? key)
 
 describe('VoiceSettingsSection', () => {
@@ -66,5 +69,35 @@ describe('VoiceSettingsSection reply-first toggle', () => {
     expect(localStorage.getItem('dsh-voice-reply-first')).toBe('0')
     fireEvent.click(checkbox)
     expect(localStorage.getItem('dsh-voice-reply-first')).toBe('1')
+  })
+})
+
+describe('VoiceSettingsSection AEC probe', () => {
+  it('reports whether the browser applied AEC to the mic track', async () => {
+    const tracks = [{ getSettings: () => ({ echoCancellation: true }), stop: vi.fn() }]
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getUserMedia: vi.fn(async () => ({ getAudioTracks: () => tracks })) },
+    })
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const buttons = view.container.querySelectorAll('button')
+    const probe = Array.from(buttons).find(b => b.textContent === '检测')!
+    fireEvent.click(probe)
+    await act(async () => {})
+    expect(tracks[0]!.stop).toHaveBeenCalled()
+    expect(view.container.textContent).toContain('浏览器已对麦克风应用回声消除')
+    vi.unstubAllGlobals()
+  })
+
+  it('reports an unavailable mic', async () => {
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getUserMedia: vi.fn(async () => { throw new Error('denied') }) },
+    })
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const buttons = view.container.querySelectorAll('button')
+    const probe = Array.from(buttons).find(b => b.textContent === '检测')!
+    fireEvent.click(probe)
+    await act(async () => {})
+    expect(view.container.textContent).toContain('无法访问麦克风')
+    vi.unstubAllGlobals()
   })
 })

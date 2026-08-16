@@ -22,11 +22,33 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
   const [replyFirst, setReplyFirstState] = useState(getReplyFirst())
   const [previewing, setPreviewing] = useState(false)
   const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
+  /** echo 受控测试探针：浏览器是否真的对麦克风应用了 AEC。 */
+  const [aecState, setAecState] = useState<string | null>(null)
+  const [aecProbing, setAecProbing] = useState(false)
 
   const preview = (): void => {
     setPreviewing(true)
     setPreviewResult(null)
     void previewVoice(voice).then((r) => { setPreviewResult(r) }).finally(() => { setPreviewing(false) })
+  }
+
+  /** 请求一次麦克风并读取浏览器实际应用的约束（受控回声测试的探针）。 */
+  const probeAec = async (): Promise<void> => {
+    setAecProbing(true)
+    setAecState(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      })
+      const track = stream.getAudioTracks()[0]
+      const applied = track?.getSettings().echoCancellation === true
+      track?.stop()
+      setAecState(applied ? t('voice.aecOn') : t('voice.aecOff'))
+    } catch {
+      setAecState(t('voice.aecUnavailable'))
+    } finally {
+      setAecProbing(false)
+    }
   }
 
   return (
@@ -76,6 +98,21 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
           {t('voice.replyFirst')}
         </span>
       </label>
+
+      <div className={css.field}>
+        <span className={css.label}>{t('voice.aecProbe')}</span>
+        <div className={css.voiceRow}>
+          <button
+            type="button"
+            className={css.previewButton}
+            disabled={aecProbing}
+            onClick={() => { void probeAec() }}
+          >
+            {aecProbing ? '…' : t('voice.aecProbeAction')}
+          </button>
+          {aecState !== null && <span className={css.aecResult}>{aecState}</span>}
+        </div>
+      </div>
 
       {previewResult !== null && (
         <p className={previewResult.ok ? css.okHint : css.errHint}>{previewResult.message}</p>

@@ -102,3 +102,9 @@
   accent-color: var(--dsw-alias-interactive-accent, #2f81f7);
   vertical-align: -2px;
 }
+
+.aecResult {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #8a8f98);
+}
