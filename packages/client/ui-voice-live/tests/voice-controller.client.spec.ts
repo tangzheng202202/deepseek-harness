@@ -239,8 +239,11 @@ describe('ABA：30x start/stop', () => {
 
       expect(cb.onFinal).toHaveBeenCalledTimes(i + 1)
       expect(cb.onFinal).toHaveBeenLastCalledWith(`第${i}句`)
-      // 回合结束（无回复朗读内容）→ 播放空闲即关闭
+      // 回合结束仍要等待 host 的 flush 确认，不能按“本地暂时无音频”提前关闭。
+      c.flushReply()
       c.endReply()
+      expect(FakeWS.alive.length).toBe(1)
+      ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
       expect(FakeWS.alive.length).toBe(0)
       expect(FakeAudioContext.alive.length).toBe(0)
       expect(allTracks().every(t => t.stopped)).toBe(true)
@@ -291,8 +294,11 @@ describe('stop at each await point', () => {
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '完整' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(1)
     expect(cb.onFinal).toHaveBeenCalledWith('完整')
-    // 提交后进入应答模式（等待回复朗读）；回合结束无朗读内容 → 立即关闭
+    // 提交后进入应答模式；回合结束要等 host 确认 flush 已处理。
+    c.flushReply()
     c.endReply()
+    expect(FakeWS.alive.length).toBe(1)
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
     expect(FakeWS.alive.length).toBe(0)
   })
 })
@@ -304,11 +310,11 @@ describe('ASR：不提前提交', () => {
     ws.__msg(JSON.stringify({ type: 'asr_partial', voiceSessionId: 'sess', text: '你好' }))
     expect(cb.onPartial).toHaveBeenCalledWith('你好')
     expect(cb.onFinal).not.toHaveBeenCalled()
-    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '你好世界' }))
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', utteranceId: 'u1', text: '你好世界' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(1)
     expect(cb.onFinal).toHaveBeenCalledWith('你好世界')
-    // 迟到的重复 final 属于旧代次？同一代次内重复 final 应只提交一次？
-    // host 保证 exactly-once；client 对同代次重复 final 目前不做去重——交由 stop 语义保证。
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', utteranceId: 'u1', text: '你好世界' }))
+    expect(cb.onFinal).toHaveBeenCalledTimes(1)
   })
 
   it('cancel 丢弃：不提交、立即关闭', async () => {
@@ -346,7 +352,9 @@ describe('TTS：播放仅在完成事件后', () => {
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '好的' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(1)
-    c.endReply() // 回合结束，无朗读内容 → 关闭
+    c.flushReply()
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
     expect(FakeWS.alive.length).toBe(0)
     // 再来一轮：mic / 连接恢复
     const ws2 = await startReady(c)
@@ -355,7 +363,9 @@ describe('TTS：播放仅在完成事件后', () => {
     c.stop()
     ws2.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '再见' }))
     expect(cb.onFinal).toHaveBeenCalledTimes(2)
+    c.flushReply()
     c.endReply()
+    ws2.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
     expect(FakeWS.alive.length).toBe(0)
   })
 })
@@ -381,8 +391,10 @@ describe('回复朗读（应答模式）', () => {
     // 回合结束：播放中不关闭
     c.endReply()
     expect(FakeWS.alive.length).toBe(1)
-    // 播放完成 → 空闲 → 关闭
+    // 播放完成但 host 尚未确认 flush，仍不能关闭。
     a?.__end()
+    expect(FakeWS.alive.length).toBe(1)
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
     expect(FakeWS.alive.length).toBe(0)
     expect(FakeAudioContext.alive.length).toBe(0)
   })
@@ -402,25 +414,34 @@ describe('回复朗读（应答模式）', () => {
     ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
     c.endReply()
     expect(FakeWS.alive.length).toBe(1)
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
+    expect(FakeWS.alive.length).toBe(1)
     FakeAudio.instances[0]?.__end()
     expect(FakeWS.alive.length).toBe(0)
   })
 
-  it('应答模式中再次 start → 复用连接（不新建）', async () => {
+  it('应答模式中再次 start → 打断旧会话并新建，旧 TTS 不会串入新回合', async () => {
     const { c, cb } = makeController()
     const ws = await startReady(c)
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '第一句' }))
     expect(FakeWS.alive.length).toBe(1)
-    // 回复朗读中再次点 mic：复用同一连接（不再 open/ready）
-    await c.start()
-    expect(FakeWS.instances.length).toBe(1) // 没有新建连接
+    // 回复朗读中再次点 mic：先发送取消并关闭旧连接，再建立新会话。
+    const started = c.start()
+    await flush()
+    const ws2 = lastWS()
+    expect(ws.readyState).toBe(FakeWS.CLOSED)
+    expect(ws.sent.some(s => typeof s === 'string' && s.includes('tts_cancel'))).toBe(true)
+    expect(FakeWS.instances.length).toBe(2)
     expect(FakeWS.alive.length).toBe(1)
-    // 复用后消息按当前代次处理：回复 TTS 正常
-    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: '回复' }))
+    ws2.__open()
+    ws2.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 'sess2', hasKey: true }))
+    await started
+    // 旧连接的迟到 TTS 不再进入播放队列。
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: '旧回复' }))
     ws.__msg(new ArrayBuffer(8))
     ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
-    expect(FakeAudio.instances.length).toBe(1)
+    expect(FakeAudio.instances.length).toBe(0)
     expect(cb.onFinal).toHaveBeenCalledTimes(1)
   })
 
@@ -429,7 +450,10 @@ describe('回复朗读（应答模式）', () => {
     const ws = await startReady(c)
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: 'x' }))
-    c.endReply() // 回合结束 → 关闭
+    c.flushReply()
+    c.endReply()
+    expect(FakeWS.alive.length).toBe(1)
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
     expect(FakeWS.alive.length).toBe(0)
     // 迟到的回复文本不再推送（连接已关，静默）
     c.pushReplyText('不该朗读')
@@ -444,7 +468,9 @@ describe('无泄漏', () => {
     const ws = await startReady(c)
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: 'x' }))
-    c.endReply() // 回合结束：停止应答超时 timer、关闭连接
+    c.flushReply()
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
     expect(FakeWS.alive.length).toBe(0)
     expect(FakeAudioContext.alive.length).toBe(0)
     // 所有 timer（connect 超时 / stop 超时 / 应答超时）都已清理

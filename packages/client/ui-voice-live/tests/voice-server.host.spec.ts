@@ -75,7 +75,7 @@ function voiceFrame(n = 1280): Buffer {
   return b
 }
 
-/** 低能量帧（RMS=100 < 阈值 300）：应被显式置零后再推给服务端。 */
+/** 低能量帧（RMS=100 < 启动阈值 300）：识别已启动后必须原样交给服务端 VAD。 */
 function lowEnergyFrame(): Buffer {
   const b = Buffer.alloc(1280)
   for (let i = 0; i < 1280; i += 2) b.writeInt16LE(100, i)
@@ -101,9 +101,11 @@ async function setup(): Promise<TestCtx> {
     origin: `http://127.0.0.1:${port}`,
   })
   const ready = await waitForMsg(client, m => m.type === 'ready')
+  const sessionId = String(ready.voiceSessionId)
+  client.send(JSON.stringify({ type: 'asr_start', voiceSessionId: sessionId }))
   return {
     client,
-    sessionId: String(ready.voiceSessionId),
+    sessionId,
     close: async () => {
       client.close()
       await new Promise<void>((r) => {
@@ -189,6 +191,7 @@ describe('ASR：50 段音频 exactly-once 有序', () => {
       })
 
       for (let i = 0; i < 50; i++) {
+        if (i > 0) client.send(JSON.stringify({ type: 'asr_start', voiceSessionId: sessionId }))
         client.send(voiceFrame())
         client.send(voiceFrame())
         client.send(voiceFrame())
@@ -218,20 +221,20 @@ describe('ASR：50 段音频 exactly-once 有序', () => {
     }
   })
 
-  it('低能量帧显式置零：麦克风底噪不掩盖静音，端点检测可断句', async () => {
+  it('识别启动后保留低能量原始帧，由服务端端点检测决定句界', async () => {
     const { client, sessionId, close } = await setup()
     try {
       client.send(voiceFrame()) // 能量帧
-      client.send(lowEnergyFrame()) // 低能量（RMS=100 < 300）：应被置零
+      client.send(lowEnergyFrame())
       client.send(lowEnergyFrame())
       client.send(JSON.stringify({ type: 'asr_end', voiceSessionId: sessionId }))
       await waitForMsg(client, m => m.type === 'asr_final')
       expect(h.asrCalls).toBe(1)
-      // 收到的前三帧：第 0 帧含语音能量，第 1/2 帧必须是全零（显式静音）
+      // 低音量语音不能被本地阈值抹掉；三帧都原样含非零采样。
       expect(h.asrChunks.length).toBeGreaterThanOrEqual(3)
       expect(h.asrChunks[0]?.some(b => b !== 0)).toBe(true)
-      expect(h.asrChunks[1]?.every(b => b === 0)).toBe(true)
-      expect(h.asrChunks[2]?.every(b => b === 0)).toBe(true)
+      expect(h.asrChunks[1]?.some(b => b !== 0)).toBe(true)
+      expect(h.asrChunks[2]?.some(b => b !== 0)).toBe(true)
     } finally {
       await close()
     }

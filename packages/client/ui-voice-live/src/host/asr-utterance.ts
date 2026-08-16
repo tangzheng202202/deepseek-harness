@@ -18,6 +18,7 @@ export class AsrUtterance {
   private queue = new BoundedQueue()
   private cancelled = false
   private finished = false
+  private readonly abortController = new AbortController()
 
   constructor(
     private readonly apiKey: string,
@@ -25,6 +26,7 @@ export class AsrUtterance {
     private readonly onFinal: (text: string) => void,
     private readonly onPartial: (text: string) => void,
     private readonly onError: (err: Error) => void,
+    private readonly onSettled: () => void = () => {},
   ) {
     this.id = id
   }
@@ -34,6 +36,7 @@ export class AsrUtterance {
     void (async () => {
       try {
         await asrStream(this.queue, this.apiKey, (r) => {
+          if (this.cancelled) return
           if (r.is_final) {
             const t = r.text.trim()
             if (t !== '') this.onFinal(t)
@@ -41,19 +44,24 @@ export class AsrUtterance {
             const t = r.text.trim()
             if (t !== '') this.onPartial(t)
           }
-        }, { endpointingMs: ENDPOINTING_MS, minSpeechMs: MIN_SPEECH_MS })
+        }, {
+          endpointingMs: ENDPOINTING_MS,
+          minSpeechMs: MIN_SPEECH_MS,
+          signal: this.abortController.signal,
+        })
       } catch (e) {
         if (!this.cancelled) this.onError(e as Error)
       } finally {
         this.finished = true
+        this.onSettled()
       }
     })()
   }
 
   /** 喂一帧音频；已结束/已取消时静默丢弃。 */
-  push(pcm: Buffer): void {
-    if (this.finished || this.cancelled) return
-    this.queue.push(pcm)
+  push(pcm: Buffer): boolean {
+    if (this.finished || this.cancelled) return false
+    return this.queue.push(pcm)
   }
 
   /** 正常停止：结束音频流，等待服务端最终结果（exactly-once）。 */
@@ -67,6 +75,7 @@ export class AsrUtterance {
     if (this.finished) return
     this.cancelled = true
     this.queue.abort()
+    this.abortController.abort()
   }
 
   get isFinished(): boolean {

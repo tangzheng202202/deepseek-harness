@@ -32,6 +32,8 @@ const SENT_RE = /^([^。！？!?.\n]+[。！？!?.\n]+)([\s\S]*)$/
 const MAX_FRAME_BYTES = 1024 * 1024
 /** tts_push 单条文本上限（字符）。 */
 const MAX_TEXT_LEN = 10000
+/** 单会话尚未切句的 TTS 文本上限，防连续无标点 push 无限增长。 */
+const MAX_TTS_BUFFER_CHARS = 20000
 /** 同端最大并发语音连接数。 */
 const MAX_CONNECTIONS = 8
 /** 单连接最长存活时长（ms），到时强制断开。 */
@@ -64,10 +66,14 @@ class VoiceSession {
   private voice: string
   /** 朗读期硬门控：true 时丢弃麦克风帧，避免外放朗读声被录进去当新指令。 */
   private ttsActive = false
+  private acceptingAudio = false
+  private disposed = false
   private currentUt: AsrUtterance | null = null
   private utSeq = 0
   private ttsSeq = 0
   private msgSeq = 0
+  private ttsGeneration = 0
+  private ttsAbort: AbortController | null = null
 
   constructor(
     private readonly ws: WebSocket,
@@ -84,16 +90,31 @@ class VoiceSession {
   }
 
   feedAudio(pcm: Buffer): void {
-    if (this.ttsActive) return // 朗读期硬门控
-    const hasEnergy = hasVoiceEnergy(pcm)
+    if (!this.acceptingAudio || this.ttsActive || this.disposed) return
     if (this.currentUt === null) {
-      if (!hasEnergy) return // 静音不启动，能量仅作提示
+      if (!hasVoiceEnergy(pcm)) return // 静音不启动，能量仅作提示
       this.startUtterance()
     }
-    // 低能量帧显式置零：麦克风底噪会掩盖真实静音，服务端端点检测
-    // （end_window_size）靠连续静音断句——把“听到的静音”转成显式
-    // 零帧推给服务端。句界仍完全由服务端判定，客户端不做句界。
-    this.currentUt?.push(hasEnergy ? pcm : Buffer.alloc(pcm.length))
+    const ut = this.currentUt
+    if (ut !== null && !ut.push(pcm)) {
+      ut.cancel()
+      if (this.currentUt === ut) this.currentUt = null
+      this.acceptingAudio = false
+      this.send({
+        type: 'error',
+        voiceSessionId: this.voiceSessionId,
+        message: 'asr: audio queue overflow',
+        sequence: ++this.msgSeq,
+      })
+    }
+  }
+
+  /** 显式打开一个识别回合；同一时刻只允许一个 utterance owner。 */
+  asrStart(): void {
+    if (this.disposed) return
+    this.currentUt?.cancel()
+    this.currentUt = null
+    this.acceptingAudio = true
   }
 
   private startUtterance(): void {
@@ -106,12 +127,16 @@ class VoiceSession {
         // 服务端断句（definite final）即一轮结束：清空 currentUt，
         // 下一帧有能量时启动新一轮，支持连续多轮对话。
         if (this.currentUt === ut) this.currentUt = null
+        this.acceptingAudio = false
         this.send({ type: 'asr_final', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq })
       },
       text => this.send({ type: 'asr_partial', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq }),
       (err) => {
         if (this.currentUt === ut) this.currentUt = null
         this.send({ type: 'error', voiceSessionId: session, message: `asr: ${err.message}`, sequence: ++this.msgSeq })
+      },
+      () => {
+        if (this.currentUt === ut) this.currentUt = null
       },
     )
     this.currentUt = ut
@@ -120,12 +145,14 @@ class VoiceSession {
 
   /** 正常停止：发送音频结束并等待最终结果（exactly-once）。 */
   asrEnd(): void {
+    this.acceptingAudio = false
     this.currentUt?.end()
     this.currentUt = null
   }
 
   /** 取消：直接丢弃，不提交结果。 */
   asrCancel(): void {
+    this.acceptingAudio = false
     this.currentUt?.cancel()
     this.currentUt = null
   }
@@ -134,6 +161,11 @@ class VoiceSession {
   private ttsChain: Promise<void> = Promise.resolve()
 
   pushTts(text: string, voice?: string): void {
+    if (this.disposed) return
+    if (this.ttsBuf.length + text.length > MAX_TTS_BUFFER_CHARS) {
+      this.send({ type: 'error', message: 'tts: pending text is too large', sequence: ++this.msgSeq })
+      return
+    }
     this.ttsBuf += text
     void this.enqueueTts(async () => {
       for (;;) {
@@ -152,32 +184,65 @@ class VoiceSession {
       const tail = this.ttsBuf.trim()
       this.ttsBuf = ''
       if (tail) await this.speak(tail, voice || this.voice)
+      this.send({ type: 'tts_idle', voiceSessionId: this.voiceSessionId, sequence: ++this.msgSeq })
     })
   }
 
   /** 把一次合成任务挂到串行链尾（前一个失败不阻断后一个）。 */
   private enqueueTts(job: () => Promise<void>): Promise<void> {
-    const next = this.ttsChain.then(job, job)
+    const generation = this.ttsGeneration
+    const guarded = async (): Promise<void> => {
+      if (this.disposed || generation !== this.ttsGeneration) return
+      await job()
+    }
+    const next = this.ttsChain.then(guarded, guarded)
     this.ttsChain = next
     return next
   }
 
   private async speak(text: string, voice: string): Promise<void> {
     const ttsId = String(++this.ttsSeq)
+    const generation = this.ttsGeneration
+    const abort = new AbortController()
+    this.ttsAbort = abort
     this.ttsActive = true
     try {
       this.send({ type: 'tts_start', ttsId, text, sequence: ++this.msgSeq })
       try {
         await ttsStream(text, voice, this.apiKey, (chunk) => {
-          if (this.ws.readyState === WebSocket.OPEN) this.ws.send(chunk)
-        })
+          if (!this.disposed && generation === this.ttsGeneration
+            && !abort.signal.aborted && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(chunk)
+          }
+        }, { signal: abort.signal })
       } catch (e) {
-        this.send({ type: 'tts_error', ttsId, message: `tts: ${(e as Error).message}`, sequence: ++this.msgSeq })
+        if (!this.disposed && generation === this.ttsGeneration) {
+          this.send({ type: 'tts_error', ttsId, message: `tts: ${(e as Error).message}`, sequence: ++this.msgSeq })
+        }
       }
-      this.send({ type: 'tts_done', ttsId, sequence: ++this.msgSeq })
+      if (!this.disposed && generation === this.ttsGeneration) {
+        this.send({ type: 'tts_done', ttsId, sequence: ++this.msgSeq })
+      }
     } finally {
+      if (this.ttsAbort === abort) this.ttsAbort = null
       this.ttsActive = false
     }
+  }
+
+  /** 打断当前朗读并令已排队的旧代次任务全部失效。 */
+  cancelTts(): void {
+    this.ttsGeneration++
+    this.ttsBuf = ''
+    this.ttsAbort?.abort()
+    this.ttsAbort = null
+  }
+
+  /** WebSocket owner 释放时终止所有云端与本地异步资源。 */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.asrCancel()
+    this.cancelTts()
   }
 
   private send(obj: unknown): void {
@@ -203,6 +268,7 @@ export function createVoiceUpgrade(
     const lifetime = setTimeout(() => ws.terminate(), MAX_SESSION_MS)
     ws.on('close', () => clearTimeout(lifetime))
     const session = new VoiceSession(ws, defaultApiKey, defaultVoice)
+    ws.once('close', () => session.dispose())
     ws.send(JSON.stringify({
       type: 'ready',
       voiceSessionId: session.voiceSessionId,
@@ -235,8 +301,10 @@ export function createVoiceUpgrade(
           typeof m.voiceSessionId !== 'string' || m.voiceSessionId === session.voiceSessionId
         switch (msg.type) {
           case 'config': if (isMySession(msg)) session.applyConfig(msg); break
+          case 'asr_start': if (isMySession(msg)) session.asrStart(); break
           case 'asr_end': if (isMySession(msg)) session.asrEnd(); break
           case 'asr_cancel': if (isMySession(msg)) session.asrCancel(); break
+          case 'tts_cancel': if (isMySession(msg)) session.cancelTts(); break
           case 'tts_push': {
             if (!isMySession(msg)) break
             const text = String(msg.text ?? '')

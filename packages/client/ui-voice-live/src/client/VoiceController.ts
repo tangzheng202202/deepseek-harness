@@ -6,7 +6,7 @@
  *         + interrupting / reconnecting / closing / failed
  *
  * 生命周期（半双工 + 回复朗读）：
- * - start()：acquire mic + 连接 /voice（连接已开则复用）。
+ * - start()：acquire mic + 连接 /voice；若上一轮仍在朗读，先打断并新建会话。
  * - stop()：停止采集，发 asr_end 并等待 final；final 提交后进入应答模式
  *   （replyMode）：WebSocket 保持打开，agent 回复文本经 pushReplyText 推给
  *   后端合成、播放；回合结束（endReply）且播放空闲后关闭，超时兜底。
@@ -75,22 +75,29 @@ class AudioCapture {
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     })
     const ctx = new AudioContext({ sampleRate: 16000 })
-    const src = ctx.createMediaStreamSource(stream)
-    const mute = ctx.createGain()
-    mute.gain.value = 0
-    mute.connect(ctx.destination)
-    const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET], { type: 'application/javascript' }))
-    await ctx.audioWorklet.addModule(blobUrl)
-    URL.revokeObjectURL(blobUrl)
-    const node = new AudioWorkletNode(ctx, 'pcm-processor')
-    node.port.onmessage = (ev) => {
-      this.onAudio(toInt16(ev.data as Float32Array))
-    }
-    src.connect(node)
-    node.connect(mute)
     this.stream = stream
     this.ctx = ctx
-    this.node = node
+    let blobUrl: string | null = null
+    try {
+      const src = ctx.createMediaStreamSource(stream)
+      const mute = ctx.createGain()
+      mute.gain.value = 0
+      mute.connect(ctx.destination)
+      blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET], { type: 'application/javascript' }))
+      await ctx.audioWorklet.addModule(blobUrl)
+      const node = new AudioWorkletNode(ctx, 'pcm-processor')
+      node.port.onmessage = (ev) => {
+        this.onAudio(toInt16(ev.data as Float32Array))
+      }
+      src.connect(node)
+      node.connect(mute)
+      this.node = node
+    } catch (error) {
+      this.stop()
+      throw error
+    } finally {
+      if (blobUrl !== null) URL.revokeObjectURL(blobUrl)
+    }
   }
 
   stop(): void {
@@ -137,15 +144,29 @@ class PlaybackQueue {
     this.pump()
   }
 
+  /** 丢弃一个失败/取消的合成任务，避免残留分片占用内存。 */
+  discard(ttsId: string): void {
+    this.pending.delete(ttsId)
+  }
+
   private pump(): void {
     if (this.current !== null || this.queue.length === 0) return
     const item = this.queue.shift()
     if (item === undefined) return
     const audio = new Audio(item.url)
     this.current = audio
-    audio.onended = () => { URL.revokeObjectURL(item.url); this.current = null; this.pump(); this.maybeIdle() }
-    audio.onerror = () => { URL.revokeObjectURL(item.url); this.current = null; this.pump(); this.maybeIdle() }
-    void audio.play()
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      URL.revokeObjectURL(item.url)
+      if (this.current === audio) this.current = null
+      this.pump()
+      this.maybeIdle()
+    }
+    audio.onended = finish
+    audio.onerror = finish
+    void audio.play().catch(finish)
   }
 
   private maybeIdle(): void {
@@ -196,16 +217,18 @@ export class VoiceController {
   private replyMode = false
   /** 回合结束标记：endReply 后播放空闲即关闭连接。 */
   private replyDone = false
+  /** host 已处理完 tts_flush；必须等该确认，不能因本地暂时无音频而提前关连接。 */
+  private replyServerIdle = false
   private replyTimer: ReturnType<typeof setTimeout> | null = null
+  /** 同一语音会话已经提交的 utterance，抵御重复 final。 */
+  private readonly submittedUtterances = new Set<string>()
 
   private static readonly STOP_TIMEOUT_MS = 3000
   /** 应答模式空闲兜底：超过该时长无合成活动强制关闭。 */
   private static readonly REPLY_TIMEOUT_MS = 120_000
 
   constructor(private readonly callbacks: VoiceCallbacks) {
-    this.playback.onIdle = () => {
-      if (this.replyMode && this.replyDone) this.teardown()
-    }
+    this.playback.onIdle = () => this.maybeFinishReply()
   }
 
   get currentState(): VoiceState {
@@ -223,9 +246,15 @@ export class VoiceController {
     }
   }
 
-  /** 开始语音会话（acquiring → connecting → listening）。连接已开（应答模式中）则复用。 */
+  /** 开始语音会话（acquiring → connecting → listening）。朗读中再次开始即打断上一轮。 */
   async start(): Promise<void> {
     if (this.active) return // 防重复 start（ABA 竞态防护由代次处理）
+    if (this.replyMode || this.ws !== null) {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'tts_cancel', voiceSessionId: this.voiceSessionId }))
+      }
+      this.teardown()
+    }
     const gen = ++this.generation
     this.active = true
 
@@ -239,16 +268,11 @@ export class VoiceController {
       if (gen !== this.generation) { capture.stop(); return }
       this.capture = capture
       this.setState('connecting')
-      if (this.ws !== null && this.ws.readyState === WebSocket.OPEN) {
-        // 复用应答模式的连接：重绑当前代次的消息处理
-        this.ws.onmessage = e => this.onMessage(gen, e)
-      } else {
-        const ok = await this.connect(gen)
-        // stop/cancel 已发生（active=false）时静默退出，不报错
-        if (!ok) {
-          if (this.active) this.fail('无法连接语音服务（后端未启动）')
-          return
-        }
+      const ok = await this.connect(gen)
+      // stop/cancel 已发生（active=false）时静默退出，不报错
+      if (!ok) {
+        if (this.active) this.fail('无法连接语音服务（后端未启动）')
+        return
       }
       this.setState('listening')
       this.capturing = true
@@ -288,7 +312,12 @@ export class VoiceController {
   private onMessage(gen: number, e: MessageEvent): void {
     if (gen !== this.generation) return // 旧代次消息拒绝
     if (typeof e.data === 'string') {
-      const msg = JSON.parse(e.data) as Record<string, unknown>
+      let msg: Record<string, unknown>
+      try {
+        msg = JSON.parse(e.data) as Record<string, unknown>
+      } catch {
+        return
+      }
       if (msg.type === 'ready') {
         this.voiceSessionId = String(msg.voiceSessionId ?? '')
         if (msg.hasKey === false) {
@@ -297,22 +326,23 @@ export class VoiceController {
           this.fail('后端未配置 VOLCENGINE_API_KEY')
           return
         }
+        this.ws?.send(JSON.stringify({ type: 'asr_start', voiceSessionId: this.voiceSessionId }))
         this.readyResolve?.(true)
         this.readyResolve = null
         return
       }
       // 识别最终结果：无论手动停止还是服务端断句，提交后进入应答模式
       if (msg.type === 'asr_final' && typeof msg.text === 'string') {
+        const utteranceId = typeof msg.utteranceId === 'string' ? msg.utteranceId : ''
+        if (utteranceId !== '' && this.submittedUtterances.has(utteranceId)) return
+        if (utteranceId !== '') this.submittedUtterances.add(utteranceId)
         const text = msg.text
-        if (this.state === 'closing' || this.state === 'failed') {
-          this.clearStopTimer()
-          this.callbacks.onFinal(text)
-        } else {
-          this.setState('thinking')
-          this.callbacks.onFinal(text)
-        }
+        this.active = false
+        this.stopCapture()
+        this.clearStopTimer()
+        this.setState('thinking')
+        this.callbacks.onFinal(text)
         this.enterReplyMode() // 保持连接，等待 agent 回复朗读
-        this.setState('thinking') // 切出 closing：后续 tts_* 消息正常处理
         return
       }
       if (this.state === 'closing' || this.state === 'failed') return // 停止后忽略其余消息
@@ -322,14 +352,22 @@ export class VoiceController {
         this.currentTtsId = String(msg.ttsId ?? '')
         this.setState('synthesizing')
       } else if (msg.type === 'tts_done') {
-        this.playback.complete(String(msg.ttsId ?? ''))
+        const ttsId = String(msg.ttsId ?? '')
+        this.playback.complete(ttsId)
+        if (this.currentTtsId === ttsId) this.currentTtsId = ''
         this.setState(this.capturing ? 'listening' : 'playing')
       } else if (msg.type === 'tts_error') {
+        const ttsId = String(msg.ttsId ?? '')
+        this.playback.discard(ttsId)
+        if (this.currentTtsId === ttsId) this.currentTtsId = ''
         this.callbacks.onError(String(msg.message ?? 'TTS 失败'))
+      } else if (msg.type === 'tts_idle') {
+        this.replyServerIdle = true
+        this.maybeFinishReply()
       } else if (msg.type === 'error') {
         this.callbacks.onError(String(msg.message ?? '语音接口错误'))
       }
-    } else if (e.data instanceof ArrayBuffer) {
+    } else if (e.data instanceof ArrayBuffer && this.currentTtsId !== '') {
       // 二进制 = TTS 音频分片，按当前 ttsId 累积
       this.playback.pushAudio(this.currentTtsId, new Uint8Array(e.data))
     }
@@ -339,9 +377,7 @@ export class VoiceController {
   stop(): void {
     if (!this.active) return
     this.active = false
-    this.capturing = false
-    this.capture?.stop()
-    this.capture = null
+    this.stopCapture()
     this.setState('closing')
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'asr_end', voiceSessionId: this.voiceSessionId }))
@@ -354,14 +390,13 @@ export class VoiceController {
 
   /** 取消：直接丢弃，立即关闭。 */
   cancel(): void {
-    if (!this.active) return
+    if (!this.active && !this.replyMode && this.ws === null && this.capture === null) return
     this.active = false
-    this.capturing = false
-    this.capture?.stop()
-    this.capture = null
+    this.stopCapture()
     this.setState('closing')
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'asr_cancel', voiceSessionId: this.voiceSessionId }))
+      this.ws.send(JSON.stringify({ type: 'tts_cancel', voiceSessionId: this.voiceSessionId }))
     }
     this.teardown() // teardown 内 ++generation，使在途 asr_final 失效（丢弃）
   }
@@ -372,7 +407,8 @@ export class VoiceController {
   pushReplyText(text: string): void {
     if (!this.replyMode) return
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'tts_push', text }))
+      this.replyServerIdle = false
+      this.ws.send(JSON.stringify({ type: 'tts_push', voiceSessionId: this.voiceSessionId, text }))
       this.armReplyTimer()
     }
   }
@@ -380,25 +416,39 @@ export class VoiceController {
   /** 回合结束：flush 未合完的尾巴。 */
   flushReply(): void {
     if (this.replyMode && this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'tts_flush' }))
+      this.replyServerIdle = false
+      this.ws.send(JSON.stringify({ type: 'tts_flush', voiceSessionId: this.voiceSessionId }))
     }
   }
 
   /**
    * 回合结束（组件在 running=false 时调用）：回复已全部推送，
-   * 播放空闲后关闭连接；若当前无播放则立即关闭。
+   * 等 host 确认 flush 已处理且本地播放空闲后关闭连接。
    */
   endReply(): void {
     if (!this.replyMode) return
     this.replyDone = true
-    if (!this.playback.isPlaying) this.teardown()
+    this.maybeFinishReply()
   }
 
   private enterReplyMode(): void {
     if (this.replyMode) return
     this.replyMode = true
     this.replyDone = false
+    this.replyServerIdle = false
     this.armReplyTimer()
+  }
+
+  private maybeFinishReply(): void {
+    if (this.replyMode && this.replyDone && this.replyServerIdle && !this.playback.isPlaying) {
+      this.teardown()
+    }
+  }
+
+  private stopCapture(): void {
+    this.capturing = false
+    this.capture?.stop()
+    this.capture = null
   }
 
   private armReplyTimer(): void {
@@ -426,17 +476,21 @@ export class VoiceController {
     this.clearReplyTimer()
     this.replyMode = false
     this.replyDone = false
+    this.replyServerIdle = false
+    this.active = false
+    this.stopCapture()
     this.ws?.close()
     this.ws = null
+    this.voiceSessionId = ''
+    this.currentTtsId = ''
+    this.submittedUtterances.clear()
     this.playback.stop()
     this.setState('idle')
   }
 
   private fail(message: string): void {
     this.active = false
-    this.capturing = false
-    this.capture?.stop()
-    this.capture = null
+    this.stopCapture()
     this.setState('failed')
     this.callbacks.onError(message)
     this.teardown()

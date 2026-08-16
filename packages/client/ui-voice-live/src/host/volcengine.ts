@@ -26,7 +26,9 @@ import { readFile } from 'node:fs/promises'
 // Endpoints
 // ---------------------------------------------------------------------------
 const TTS_URL = 'wss://openspeech.bytedance.com/api/v3/tts/bidirection'
-const ASR_URL = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel'
+// 优化双向流式端点：支持 enable_nonstream 二遍识别 + VAD 分段（definite 输出），
+// 是流式自动断句（end_window_size）生效的前提（plain bigmodel 只返回 partial）。
+const ASR_URL = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async'
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -334,9 +336,14 @@ async function openWS(
   url: string,
   headers: Record<string, string>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ ws: WebSocket; stream: MessageStream }> {
+  if (signal?.aborted === true) throw new VolcengineVoiceError('operation aborted')
   const ws = new WebSocket(url, { headers, maxPayload: 16 * 1024 * 1024 })
   const stream = new MessageStream()
+  const abort = (): void => ws.terminate()
+  signal?.addEventListener('abort', abort, { once: true })
+  ws.once('close', () => signal?.removeEventListener('abort', abort))
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -356,6 +363,10 @@ async function openWS(
         reject(new VolcengineVoiceError(`handshake failed: ${s}`))
       }
     })
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer)
+      reject(new VolcengineVoiceError('operation aborted'))
+    }, { once: true })
   })
 
   ws.on('message', (data: WebSocket.RawData) => {
@@ -437,6 +448,8 @@ export interface TtsStreamOptions {
   requestId?: string
   /** Per-phase receive timeout in ms. Default 30000. */
   timeoutMs?: number
+  /** Cancels the cloud session and releases its WebSocket immediately. */
+  signal?: AbortSignal
 }
 
 export async function ttsStream(
@@ -453,6 +466,7 @@ export async function ttsStream(
     resourceId = 'seed-tts-2.0',
     requestId,
     timeoutMs = 30000,
+    signal,
   } = options
 
   const headers = buildHeaders(apiKey, resourceId, requestId)
@@ -475,7 +489,7 @@ export async function ttsStream(
   }
 
   const sessionId = randomUUID()
-  const { ws, stream } = await openWS(TTS_URL, headers, timeoutMs)
+  const { ws, stream } = await openWS(TTS_URL, headers, timeoutMs, signal)
 
   try {
     // 1. StartConnection -> ConnectionStarted
@@ -642,6 +656,18 @@ export interface AsrStreamOptions {
   resourceId?: string
   requestId?: string
   timeoutMs?: number
+  /** Cancels the cloud session without requesting a final transcript. */
+  signal?: AbortSignal
+}
+
+/** 火山双向流式的句末在最后一个 utterance.definite，而非稳定存在的顶层 is_final。 */
+export function isDefiniteAsrResult(result: Record<string, unknown>): boolean {
+  if (result.is_final === true) return true
+  const utterances = result.utterances
+  if (!Array.isArray(utterances) || utterances.length === 0) return false
+  const last = utterances.at(-1)
+  return typeof last === 'object' && last !== null
+    && (last as Record<string, unknown>).definite === true
 }
 
 /** Split raw PCM16 into fixed-size segments, matching the Python chunker. */
@@ -692,6 +718,7 @@ export async function asrStream(
     resourceId = 'volc.bigasr.sauc.duration',
     requestId,
     timeoutMs = 30000,
+    signal,
   } = options
 
   const headers = buildHeaders(apiKey, resourceId, requestId)
@@ -717,14 +744,16 @@ export async function asrStream(
       enable_punc: enablePunc,
       enable_ddc: enableDdc,
       show_utterances: showUtterances,
-      enable_nonstream: false,
+      // 二遍识别 + VAD 分段：只有 enable_nonstream=true 时服务端才输出
+      // definite final（配合 end_window_size 实现流式自动断句）。
+      enable_nonstream: true,
       // 服务端端点检测：静音超时自动断句（输出 definite），客户端能量 VAD 不再决定句界。
       ...(endpointingMs !== undefined ? { end_window_size: endpointingMs } : {}),
       ...(minSpeechMs !== undefined ? { force_to_speech_time: minSpeechMs } : {}),
     },
   }
 
-  const { ws, stream } = await openWS(ASR_URL, headers, timeoutMs)
+  const { ws, stream } = await openWS(ASR_URL, headers, timeoutMs, signal)
 
   let seq = 1
   const initMsg = new Message({
@@ -754,7 +783,7 @@ export async function asrStream(
           const result = payload.result
           if (result && typeof result === 'object') {
             const r = result as Record<string, unknown>
-            const isFinal = Boolean(r.is_final) || Boolean(msg.flag & Flags.LastNoSeq)
+            const isFinal = isDefiniteAsrResult(r) || Boolean(msg.flag & Flags.LastNoSeq)
             const out: AsrResult = {
               text: typeof r.text === 'string' ? r.text : '',
               is_final: isFinal,
@@ -775,7 +804,7 @@ export async function asrStream(
         }
       }
     } catch (e) {
-      recvError = e as Error
+      if (signal?.aborted !== true) recvError = e as Error
     }
   })()
 
@@ -805,7 +834,7 @@ export async function asrStream(
       prev = chunk
     }
 
-    if (!finished) {
+    if (!finished && signal?.aborted !== true) {
       const finalBytes = prev ?? Buffer.alloc(0)
       send(
         ws,
@@ -820,15 +849,19 @@ export async function asrStream(
       )
     }
   } catch (e) {
-    recvError = recvError ?? (e as Error)
+    if (signal?.aborted !== true) recvError = recvError ?? (e as Error)
+    ws.terminate()
   }
 
-  await receiver
-  if (recvError) throw recvError
-
   try {
-    ws.close()
-  } catch {
-    /* ignore */
+    if (signal?.aborted === true) ws.terminate()
+    await receiver
+    if (recvError) throw recvError
+  } finally {
+    try {
+      ws.close()
+    } catch {
+      /* ignore */
+    }
   }
 }
