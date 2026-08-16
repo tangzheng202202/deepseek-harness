@@ -13,6 +13,8 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type { PartialAssistant } from '@deepseek-ai/dsh-client-runtime/client'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { getReplyFirst, REPLY_FIRST_TEXT } from './usePipelineVoice.ts'
+import { createWakeWordDetector, type WakeWordDetector } from './wake-word.ts'
+import { getWakeWord, getWakeWordEnabled } from './usePipelineVoice.ts'
 import { VoiceController, type VoiceState } from './VoiceController.ts'
 import css from './VoiceInputButton.module.css'
 
@@ -73,6 +75,25 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
   useEffect(() => {
     controllerRef.current?.setDshSessionId(dshSessionId)
   }, [dshSessionId])
+
+  // 语音唤醒：开启时挂一个常驻监听器，识别到唤醒词自动进入语音会话。
+  const wakeDetectorRef = useRef<WakeWordDetector | null>(null)
+  useEffect(() => {
+    if (!getWakeWordEnabled()) return
+    let stopped = false
+    const detector = createWakeWordDetector(getWakeWord(), () => {
+      if (stopped) return
+      const c = controller()
+      if (!c.isActive) void c.start() // 唤醒即开始对话
+    })
+    wakeDetectorRef.current = detector
+    void detector.start()
+    return () => {
+      stopped = true
+      detector.stop()
+      wakeDetectorRef.current = null
+    }
+  }, [])
 
   // 回复朗读：语音回合内，把 partial 正文增量推给后端合成。
   useEffect(() => {

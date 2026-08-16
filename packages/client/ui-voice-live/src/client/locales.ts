@@ -22,6 +22,8 @@ export const zh = {
   'voice.aecOn': '浏览器已对麦克风应用回声消除（AEC 生效）',
   'voice.aecOff': '浏览器未应用回声消除（AEC 未生效）',
   'voice.aecUnavailable': '无法访问麦克风（检查浏览器权限）',
+  'voice.wakeEnable': '语音唤醒（说唤醒词自动开始对话，会持续占用麦克风）',
+  'voice.wakeWord': '唤醒词',
 }
 
 /** English dictionary. */
@@ -43,6 +45,8 @@ export const en = {
   'voice.aecOn': 'The browser applied AEC to the mic track',
   'voice.aecOff': 'The browser did not apply AEC to the mic track',
   'voice.aecUnavailable': 'Mic unavailable (check browser permission)',
+  'voice.wakeEnable': 'Wake word (speak the keyword to start; keeps the mic on)',
+  'voice.wakeWord': 'Wake word',
 }
 
 export type VoiceKey = keyof typeof zh

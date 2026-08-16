@@ -7,9 +7,9 @@ import { useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconPlayOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
-  getActiveProvider, getActiveVoice, getReplyFirst,
+  getActiveProvider, getActiveVoice, getReplyFirst, getWakeWord, getWakeWordEnabled,
   previewVoice, type PreviewResult, PROVIDERS, setActiveProvider, setActiveVoice,
-  setReplyFirst, VOICE_OPTIONS,
+  setReplyFirst, setWakeWord, setWakeWordEnabled, VOICE_OPTIONS,
 } from './usePipelineVoice.ts'
 import css from './VoiceSettingsSection.module.css'
 
@@ -20,6 +20,8 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
   const [provider, setProvider] = useState(getActiveProvider())
   const [voice, setVoice] = useState(getActiveVoice())
   const [replyFirst, setReplyFirstState] = useState(getReplyFirst())
+  const [wakeEnabled, setWakeEnabledState] = useState(getWakeWordEnabled())
+  const [wakeWord, setWakeWordState] = useState(getWakeWord())
   const [previewing, setPreviewing] = useState(false)
   const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
   /** echo 受控测试探针：浏览器是否真的对麦克风应用了 AEC。 */
@@ -98,6 +100,30 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
           {t('voice.replyFirst')}
         </span>
       </label>
+
+      <label className={css.field}>
+        <span className={css.label}>
+          <input
+            type="checkbox"
+            className={css.checkbox}
+            checked={wakeEnabled}
+            onChange={(e) => { setWakeEnabledState(e.target.checked); setWakeWordEnabled(e.target.checked) }}
+          />
+          {t('voice.wakeEnable')}
+        </span>
+      </label>
+      {wakeEnabled && (
+        <div className={css.field}>
+          <span className={css.label}>{t('voice.wakeWord')}</span>
+          <input
+            className={css.input}
+            type="text"
+            value={wakeWord}
+            maxLength={20}
+            onChange={(e) => { setWakeWordState(e.target.value); setWakeWord(e.target.value) }}
+          />
+        </div>
+      )}
 
       <div className={css.field}>
         <span className={css.label}>{t('voice.aecProbe')}</span>

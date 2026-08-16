@@ -77,6 +77,31 @@ export function setReplyFirst(on: boolean): void {
   localStorage.setItem('dsh-voice-reply-first', on ? '1' : '0')
 }
 
+/** 默认唤醒词。 */
+export const DEFAULT_WAKE_WORD = '你好小戴'
+
+/** 是否开启语音唤醒（默认关：开启会持续占用麦克风）。 */
+export function getWakeWordEnabled(): boolean {
+  if (typeof localStorage === 'undefined') return false
+  return localStorage.getItem('dsh-voice-wake') === '1'
+}
+
+export function setWakeWordEnabled(on: boolean): void {
+  if (typeof localStorage === 'undefined') return
+  localStorage.setItem('dsh-voice-wake', on ? '1' : '0')
+}
+
+/** 自定义唤醒词。 */
+export function getWakeWord(): string {
+  if (typeof localStorage === 'undefined') return DEFAULT_WAKE_WORD
+  return localStorage.getItem('dsh-voice-wakeword') ?? DEFAULT_WAKE_WORD
+}
+
+export function setWakeWord(word: string): void {
+  if (typeof localStorage === 'undefined') return
+  localStorage.setItem('dsh-voice-wakeword', word)
+}
+
 /** 试听结果。 */
 export interface PreviewResult { ok: boolean; message: string }
 
