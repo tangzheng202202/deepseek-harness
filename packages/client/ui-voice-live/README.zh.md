@@ -45,7 +45,9 @@ API Key 由宿主的 `process.env.VOLCENGINE_API_KEY` 提供；浏览器不持�
 
 ## Known Limitations and Deferred Work
 
-- **唤醒词**未实现：当前为按键说话（push-to-talk）。计划用本地唤醒引擎（sherpa-onnx WASM）并需打包下载的模型，待核心闭环验收后再做。
+- **唤醒词**以 Web Speech API 实现（Chrome/Safari、zh-CN、识别文本包含唤醒词即触发），默认关闭（持续占用麦克风）。两个约束如实记录、不遮掩：
+  - Chrome 的 Web Speech 识别走 Google 云端识别服务，国内网络不可达——设置里的「检测唤醒可用性」探针会显示具体 `onerror` 原因（如 `network`），不再静默失败；macOS 上可用浏览器是 Safari（Apple 服务）。
+  - 首选本地离线引擎 sherpa-onnx WASM 关键词检测被上游阻断：`sherpa-onnx-wasm` npm 包已删除（npm/jsdelivr/unpkg/npmmirror 均 404），当前 GitHub release 资产均为专用构建、wasm 内无 KWS 内核（已核实无 `sherpa_onnx_*_kws` 符号）。vosk-browser 作为备选评估过，但其固定中文词表无法约束「小戴」这类自定义词。`WakeWordDetector` 接口保留未来本地 WASM 引擎的接入缝（待有可用分发）。
 - **回声消除**依赖浏览器对 WebRTC 麦克风轨的 AEC（Chrome AEC3）。`VoiceController.getMicAec()` 可读取浏览器实际采纳值。`new Audio()` 播放不在 Chrome AEC 覆盖内（Chromium bug 687574），因此循环保持半双工：TTS 播放期间门控麦克风帧，打断先停播放再开始新识别。受控回声测试（扬声器 vs 耳机、AEC 开关）步骤见交付说明；运行时决策为半双工 + 打断。
 - **实时字幕**以输入框增量草稿呈现（asr_partial）；暂无悬浮字幕层。
 - 服务端断句依赖火山优化双向流式端点（`bigmodel_async` + `enable_nonstream`）；普通 `bigmodel` 流只回 partial、不会自行结束。

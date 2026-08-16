@@ -73,10 +73,23 @@ None; this package neither assembles nor sends a provider request.
 
 ## Known Limitations and Deferred Work
 
-- **Wake word** is not implemented: activation is push-to-talk via the mic
-  button. A local wake-word engine (sherpa-onnx WASM) is the planned path and
-  requires bundling a downloaded model; it is intentionally out of scope until
-  the core loop is accepted.
+- **Wake word** ships as a Web Speech API implementation (Chrome/Safari,
+  zh-CN, keyword match on the recognized transcript). It is off by default
+  (keeps the mic held). Two constraints are documented rather than papered
+  over:
+  - Chrome's Web Speech recognition routes through Google's cloud
+    recognizer, which is unreachable from mainland networks — the settings
+    probe (`检测唤醒可用性`) surfaces the exact `onerror` reason
+    (e.g. `network`) instead of failing silently; Safari (Apple's service)
+    is the working browser on macOS.
+  - The preferred local offline engine, sherpa-onnx WASM keyword spotting,
+  is blocked upstream: the `sherpa-onnx-wasm` npm package is deleted (404
+  on npm/jsdelivr/unpkg/npmmirror) and the current GitHub release assets
+  are task-specific builds whose wasm binaries contain no KWS kernel
+  (verified: no `sherpa_onnx_*_kws` symbols). vosk-browser was evaluated as
+  a fallback but its fixed Chinese model vocabulary cannot constrain custom
+  keywords such as the default wake phrase. The `WakeWordDetector` interface
+  keeps the seam for a future local WASM engine once a distribution exists.
 - **Echo cancellation** relies on the browser's AEC (Chrome AEC3) applied to
   the WebRTC mic track. `VoiceController.getMicAec()` reports whether the
   browser actually applied AEC. `new Audio()` playback is not covered by
