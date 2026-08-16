@@ -28,7 +28,7 @@ const t = (key: string): string => ({
 
 describe('VoiceSettingsSection', () => {
   it('renders provider/voice choices and persists selection without module-global state', () => {
-    const view = render(<VoiceSettingsSection {...({ t } as never)} />)
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
     const selects = view.container.querySelectorAll('select')
     expect(selects).toHaveLength(2)
     fireEvent.change(selects[0]!, { target: { value: 'volcengine' } })
@@ -41,7 +41,7 @@ describe('VoiceSettingsSection', () => {
   it('disables preview while pending and renders both success and failure', async () => {
     let answer!: (value: { ok: boolean; message: string }) => void
     h.preview.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
-    const view = render(<VoiceSettingsSection {...({ t } as never)} />)
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
     const button = view.container.querySelector('button')!
     fireEvent.click(button)
     expect(button.disabled).toBe(true)

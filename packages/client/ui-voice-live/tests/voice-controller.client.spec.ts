@@ -13,7 +13,8 @@
  * 全部以可控 fake 替换；volcengine 不触网。
  */
 
-import { describe, expect, it, vi, beforeAll, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, vi, beforeAll, beforeEach, afterEach, type Mock } from 'vitest'
+import type { VoiceState } from '../src/client/VoiceController.ts'
 
 /* ---------------- fake 浏览器环境 ---------------- */
 
@@ -185,19 +186,17 @@ function lastWS(): FakeWS {
 }
 
 function allTracks(): FakeTrack[] {
-  return FakeWS.instances.flatMap(() => []).concat(
-    FakeStreamInstances.flatMap(s => s.tracks),
-  )
+  return FakeStreamInstances.flatMap(s => s.tracks)
 }
 
 /** 记录测试期间创建的 FakeStream（用于泄漏断言）。 */
 const FakeStreamInstances: FakeStream[] = []
 
 interface Callbacks {
-  onFinal: ReturnType<typeof vi.fn>
-  onPartial: ReturnType<typeof vi.fn>
-  onError: ReturnType<typeof vi.fn>
-  onState: ReturnType<typeof vi.fn>
+  onFinal: Mock<(text: string) => void>
+  onPartial: Mock<(text: string) => void>
+  onError: Mock<(message: string) => void>
+  onState: Mock<(s: VoiceState) => void>
 }
 
 function makeController(): { c: InstanceType<VoiceControllerCtor>; cb: Callbacks } {

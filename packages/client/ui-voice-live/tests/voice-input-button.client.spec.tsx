@@ -47,7 +47,7 @@ describe('VoiceInputButton', () => {
     const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
     let snapshot: Record<string, unknown> = { running: false, partial: null }
     const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
-    const props = { inputActions, useSession, t } as never
+    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
     const view = render(<VoiceInputButton {...props} />)
     const button = view.container.querySelector('button')!
     expect(button.getAttribute('aria-pressed')).toBe('false')

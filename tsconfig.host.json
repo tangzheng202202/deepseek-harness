@@ -101,6 +101,11 @@
     "packages/*/*/tests/**/*.client.tsx",
     "packages/*/*/tests/**/*.client.spec.ts",
     "packages/*/*/tests/**/*.client.spec.tsx",
+    // ui-voice-live is a split host/client package; its host-half tests
+    // import ../src/host sources that the host aggregate excludes
+    // (packages/client/*/src/**), which trips TS6307. The host logic is
+    // covered by the package build (tsc -b) and vitest runtime runs.
+    "packages/client/ui-voice-live/tests/**/*.host.spec.ts",
     "packages/client/tsdown.client.ts",
     "scripts/client-bundle-css.spec.ts",
     "packages/typert/generator/tests/fixtures/**",
