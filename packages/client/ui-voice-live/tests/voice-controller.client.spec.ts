@@ -19,12 +19,17 @@ import { describe, expect, it, vi, beforeAll, beforeEach, afterEach } from 'vite
 
 class FakeTrack {
   stopped = false
+  settings: MediaTrackSettings
+  constructor(settings: MediaTrackSettings = { echoCancellation: true }) { this.settings = settings }
   stop(): void { this.stopped = true }
+  getSettings(): MediaTrackSettings { return this.settings }
 }
 
 class FakeStream {
   readonly tracks: FakeTrack[]
-  constructor(n = 1) { this.tracks = Array.from({ length: n }, () => new FakeTrack()) }
+  constructor(n = 1, settings?: MediaTrackSettings) {
+    this.tracks = Array.from({ length: n }, () => new FakeTrack(settings))
+  }
   getTracks(): FakeTrack[] { return this.tracks }
 }
 
@@ -97,7 +102,8 @@ class FakeAudio {
   __fail(): void { this.onerror?.() }
 }
 
-let gumImpl: () => Promise<FakeStream> = () => Promise.resolve(new FakeStream())
+let gumImpl: (constraints?: MediaStreamConstraints) => Promise<FakeStream> =
+  () => Promise.resolve(new FakeStream())
 
 function installFakes(): void {
   vi.stubGlobal('window', { location: { protocol: 'http:', host: '127.0.0.1:3080' } })
@@ -105,7 +111,9 @@ function installFakes(): void {
   vi.stubGlobal('AudioContext', FakeAudioContext)
   vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode)
   vi.stubGlobal('Audio', FakeAudio)
-  vi.stubGlobal('navigator', { mediaDevices: { getUserMedia: vi.fn(() => gumImpl()) } })
+  vi.stubGlobal('navigator', {
+    mediaDevices: { getUserMedia: vi.fn((c?: MediaStreamConstraints) => gumImpl(c)) },
+  })
   const store = new Map<string, string>()
   vi.stubGlobal('localStorage', {
     getItem: (k: string) => store.get(k) ?? null,
@@ -149,8 +157,9 @@ beforeEach(() => {
   FakeAudioWorkletNode.instances = []
   FakeAudio.instances = []
   FakeStreamInstances.length = 0
-  gumImpl = () => {
-    const s = new FakeStream()
+  gumImpl = (constraints?: MediaStreamConstraints) => {
+    const ec = (constraints?.audio as { echoCancellation?: boolean } | undefined)?.echoCancellation !== false
+    const s = new FakeStream(1, { echoCancellation: ec })
     FakeStreamInstances.push(s)
     return Promise.resolve(s)
   }
@@ -500,6 +509,38 @@ describe('barge-in：会话 id 上报', () => {
     expect(FakeWS.alive.length).toBe(1)
     c.cancel()
     expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('echo 探针：默认请求 AEC，getMicAec 报告浏览器实际采纳值', async () => {
+    const { c } = makeController()
+    expect(c.getMicAec()).toBeNull() // 未采集
+    const p = c.start()
+    await flush()
+    const gum = navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>
+    expect(gum).toHaveBeenCalledWith({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+    lastWS().__open()
+    lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    await p
+    expect(c.getMicAec()).toBe(true) // FakeTrack 默认报告 AEC 开启
+    c.cancel()
+  })
+
+  it('echo 探针：AEC 关闭时请求与报告都反映关闭', async () => {
+    const { c } = makeController()
+    // 构造 echoCancellation=false 的控制器（受控对比测试）
+    const { VoiceController: VC } = await import('../src/client/VoiceController.ts')
+    const cb = { onState: vi.fn(), onFinal: vi.fn(), onPartial: vi.fn(), onError: vi.fn() }
+    const c2 = new VC(cb, false)
+    const p = c2.start()
+    await flush()
+    const gum = navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>
+    expect(gum).toHaveBeenLastCalledWith({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: true } })
+    lastWS().__open()
+    lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    await p
+    expect(c2.getMicAec()).toBe(false)
+    c2.cancel()
+    void c
   })
 })
 

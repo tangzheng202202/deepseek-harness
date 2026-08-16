@@ -68,11 +68,18 @@ class AudioCapture {
   private ctx: AudioContext | null = null
   private node: AudioWorkletNode | null = null
 
-  constructor(private readonly onAudio: (i16: Int16Array<ArrayBuffer>) => void) {}
+  constructor(
+    private readonly onAudio: (i16: Int16Array<ArrayBuffer>) => void,
+    private readonly echoCancellation = true,
+  ) {}
 
   async start(): Promise<void> {
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      audio: {
+        channelCount: 1,
+        echoCancellation: this.echoCancellation,
+        noiseSuppression: true,
+      },
     })
     const ctx = new AudioContext({ sampleRate: 16000 })
     this.stream = stream
@@ -98,6 +105,17 @@ class AudioCapture {
     } finally {
       if (blobUrl !== null) URL.revokeObjectURL(blobUrl)
     }
+  }
+
+  /** 回声消除实测探针：读取浏览器实际应用的约束（Chrome AEC3 是否生效）。 */
+  getMicSettings(): MediaTrackSettings | null {
+    return this.stream?.getTracks()[0]?.getSettings() ?? null
+  }
+
+  /** AEC 是否被浏览器实际采纳（getUserMedia 请求了、约束报告也确认了）。 */
+  get hasActiveAec(): boolean {
+    const s = this.getMicSettings()
+    return s?.echoCancellation === true
   }
 
   stop(): void {
@@ -229,7 +247,10 @@ export class VoiceController {
   /** 应答模式空闲兜底：超过该时长无合成活动强制关闭。 */
   private static readonly REPLY_TIMEOUT_MS = 120_000
 
-  constructor(private readonly callbacks: VoiceCallbacks) {
+  constructor(
+    private readonly callbacks: VoiceCallbacks,
+    private readonly echoCancellation = true,
+  ) {
     this.playback.onIdle = () => { this.maybeFinishReply() }
   }
 
@@ -244,6 +265,11 @@ export class VoiceController {
   /** 同步当前 DSH 会话 id（随 config 上报，供 host 端打断时取消 agent）。 */
   setDshSessionId(id: string): void {
     this.dshSessionId = id
+  }
+
+  /** 回声消除实测探针：true/false = 浏览器约束报告 AEC 开/关；null = 未采集。 */
+  getMicAec(): boolean | null {
+    return this.capture?.hasActiveAec ?? null
   }
 
   private setState(s: VoiceState): void {
@@ -270,7 +296,7 @@ export class VoiceController {
       const capture = new AudioCapture((i16) => {
         if (gen !== this.generation || !this.capturing) return // 旧代次/非采集态丢弃
         if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(i16)
-      })
+      }, this.echoCancellation)
       await capture.start()
       if (gen !== this.generation) { capture.stop(); return }
       this.capture = capture
