@@ -9,7 +9,38 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-const WS_PORT = 3081
+// 页面是 https 时用 wss，否则用 ws（信任检查只允许 loopback，但协议跟着页面走）。
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${window.location.host}/voice`
+
+/**
+ * AudioWorklet 采集器：每累计 2048 帧（@16k ≈ 128ms）把 Float32 帧发回主线程。
+ * 相比已废弃的 ScriptProcessor，跑在专用音频线程，不随主线程卡顿丢帧。
+ */
+const PCM_WORKLET = `
+class PCMProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(0);
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input.length > 0 && input[0]) {
+      const chunk = input[0];
+      const merged = new Float32Array(this.buf.length + chunk.length);
+      merged.set(this.buf, 0);
+      merged.set(chunk, this.buf.length);
+      if (merged.length >= 2048) {
+        this.port.postMessage(merged.slice(0, 2048));
+        this.buf = merged.slice(2048);
+      } else {
+        this.buf = merged;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-processor', PCMProcessor);
+`
 
 /** 可选音色（30 个，均经 seed-tts-2.0 实测通过）。 */
 export const VOICE_OPTIONS: readonly { id: string; label: string }[] = [
@@ -58,14 +89,12 @@ export function getActiveVoice(): string {
   return activeVoice
 }
 
-/** 支持的服务商。 */
+/** 支持的服务商（实际仅火山后端可用；「本地免费」为虚假项，已移除）。 */
 export const PROVIDERS: readonly { id: string; label: string }[] = [
   { id: 'volcengine', label: '火山引擎（豆包）' },
-  { id: 'local', label: '本地免费（无需 Key）' },
 ]
 
 let activeProvider = (typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-voice-provider') : null) ?? 'volcengine'
-let activeApiKey = (typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-voice-api-key') : null) ?? ''
 
 export function getActiveProvider(): string {
   return activeProvider
@@ -74,15 +103,6 @@ export function getActiveProvider(): string {
 export function setActiveProvider(provider: string): void {
   activeProvider = provider
   if (typeof localStorage !== 'undefined') localStorage.setItem('dsh-voice-provider', provider)
-}
-
-export function getActiveApiKey(): string {
-  return activeApiKey
-}
-
-export function setActiveApiKey(key: string): void {
-  activeApiKey = key
-  if (typeof localStorage !== 'undefined') localStorage.setItem('dsh-voice-api-key', key)
 }
 
 /** Minimal typed surface over the non-standard SpeechRecognition API (fallback). */
@@ -121,6 +141,8 @@ export interface RealtimeVoiceHandle {
   listening: boolean
   /** 后端模式：volcano（火山）| fallback（浏览器本地）| idle。 */
   mode: 'idle' | 'volcano' | 'fallback'
+  /** 最近一次错误（用于按钮红显 + 提示）。 */
+  error: string | null
   start(): void
   stop(): void
   setRunning(running: boolean): void
@@ -194,9 +216,12 @@ function plainTextOfMarkdown(md: string): string {
 /** Sequential MP3 player: queues sentences so they never overlap. */
 let currentAudio: HTMLAudioElement | null = null
 let pendingBlobs: { blob: Blob; url: string }[] = []
+/** 播放队列空闲（全部朗读完）时的回调，前端用它恢复麦克风发送。 */
+let onPlaybackIdle: (() => void) | null = null
 
 function pumpAudioQueue(): void {
-  if (currentAudio !== null || pendingBlobs.length === 0) return
+  if (currentAudio !== null) return
+  if (pendingBlobs.length === 0) { onPlaybackIdle?.(); return }
   const item = pendingBlobs.shift()
   if (item === undefined) return
   const audio = new Audio(item.url)
@@ -234,31 +259,49 @@ function speakReply(text: string, pipeline: boolean, ws: WebSocket | null): void
   }
 }
 
-/** 试听：一次性连接后端合成一句示例，播放后关闭。 */
-export async function previewVoice(voice: string, apiKey: string): Promise<void> {
+/** 试听结果。 */
+export interface PreviewResult { ok: boolean; message: string }
+
+/** 试听：连接后端合成一句示例并播放。key 由后端环境变量提供，前端不传。 */
+export async function previewVoice(voice: string): Promise<PreviewResult> {
   try {
-    const ws = new WebSocket(`ws://${window.location.hostname || '127.0.0.1'}:${WS_PORT}/ws`)
+    const ws = new WebSocket(WS_URL)
     ws.binaryType = 'arraybuffer'
     const chunks: Uint8Array[] = []
+    let gotReady = false
+    let hasKey = false
+    let gotAudio = false
+    let errorMsg = ''
     const opened = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), 3000)
       ws.onopen = () => { clearTimeout(timer); resolve(true) }
       ws.onerror = () => { clearTimeout(timer); resolve(false) }
     })
-    if (!opened) { ws.close(); return }
+    if (!opened) { ws.close(); return { ok: false, message: '无法连接语音服务（后端未启动）' } }
     ws.onmessage = (e) => {
       if (typeof e.data === 'string') {
-        const msg = JSON.parse(e.data) as { type: string }
-        if (msg.type === 'tts_done') playMp3Blob(chunks.splice(0))
+        const msg = JSON.parse(e.data) as { type: string; hasKey?: boolean; message?: string }
+        if (msg.type === 'ready') { gotReady = true; hasKey = Boolean(msg.hasKey) }
+        else if (msg.type === 'tts_done') playMp3Blob(chunks.splice(0))
+        else if (msg.type === 'error') errorMsg = msg.message ?? '语音接口错误'
       } else if (e.data instanceof ArrayBuffer) {
         chunks.push(new Uint8Array(e.data))
+        gotAudio = true
       }
     }
-    ws.send(JSON.stringify({ type: 'config', provider: 'volcengine', api_key: apiKey, voice }))
+    ws.send(JSON.stringify({ type: 'config', provider: 'volcengine', voice }))
     ws.send(JSON.stringify({ type: 'tts_push', text: '你好，这是你选择的音色，听起来还满意吗？' }))
     ws.send(JSON.stringify({ type: 'tts_flush' }))
-    setTimeout(() => { ws.close() }, 5000)
-  } catch { /* 试听失败静默忽略 */ }
+    await new Promise(resolve => setTimeout(resolve, 2500))
+    ws.close()
+    if (!gotReady) return { ok: false, message: '语音服务无响应' }
+    if (!hasKey) return { ok: false, message: '后端未配置 VOLCENGINE_API_KEY' }
+    if (errorMsg) return { ok: false, message: errorMsg }
+    if (!gotAudio) return { ok: false, message: '未收到合成音频' }
+    return { ok: true, message: '试听成功' }
+  } catch (e) {
+    return { ok: false, message: (e as Error).message }
+  }
 }
 
 export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHandle {
@@ -267,6 +310,7 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
   const [active, setActive] = useState(false)
   const [listening, setListening] = useState(false)
   const [mode, setMode] = useState<'idle' | 'volcano' | 'fallback'>('idle')
+  const [error, setError] = useState<string | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
   const pipelineRef = useRef(false)
@@ -278,6 +322,8 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
   const audioCtxRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const optionsRef = useRef(options)
+  // 朗读播放期间暂停麦克风发送，防止外放朗读声被录进去（回声串扰）。
+  const capturePausedRef = useRef(false)
   optionsRef.current = options
   // 只有语音输入发起的回合才朗读回复（键盘输入不朗读）。
   const voicePendingRef = useRef(false)
@@ -298,6 +344,13 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
     streamRef.current = null
     audioCtxRef.current?.close().catch(() => {})
     audioCtxRef.current = null
+    capturePausedRef.current = false
+  }, [])
+
+  // 朗读队列播完时恢复麦克风发送。
+  useEffect(() => {
+    onPlaybackIdle = () => { capturePausedRef.current = false }
+    return () => { onPlaybackIdle = null }
   }, [])
 
   // ---- fallback (browser-native) STT ----
@@ -345,8 +398,12 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       })
-      const ctx = new AudioContext()
-      const url = `ws://${window.location.hostname || '127.0.0.1'}:${WS_PORT}/ws`
+      if (!activeRef.current) { // 等授权期间已被 stop：立即关流退出
+        stream.getTracks().forEach(t => t.stop())
+        return false
+      }
+      const ctx = new AudioContext({ sampleRate: 16000 })
+      const url = WS_URL
       const ws = new WebSocket(url)
       ws.binaryType = 'arraybuffer'
 
@@ -362,6 +419,12 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
         setMode('fallback')
         return false
       }
+      if (!activeRef.current) { // ws 建连期间已被 stop：清理退出
+        ws.close()
+        stream.getTracks().forEach(t => t.stop())
+        await ctx.close()
+        return false
+      }
 
       pipelineRef.current = true
       audioCtxRef.current = ctx
@@ -369,25 +432,29 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
       wsRef.current = ws
       setMode('volcano')
 
-      // 下发运行时配置（服务商 / API Key / 音色）。
+      // 下发运行时配置（服务商 / 音色）。API key 由后端环境变量提供，前端不传。
       ws.send(JSON.stringify({
         type: 'config',
         provider: activeProvider,
-        api_key: activeApiKey,
         voice: activeVoice,
       }))
 
       ws.onmessage = (e) => {
         if (typeof e.data === 'string') {
-          const msg = JSON.parse(e.data) as { type: string; text?: string }
-          if (msg.type === 'asr_final' && msg.text !== undefined) {
+          const msg = JSON.parse(e.data) as { type: string; text?: string; hasKey?: boolean; message?: string }
+          if (msg.type === 'ready') {
+            if (msg.hasKey === false) setError('后端未配置 VOLCENGINE_API_KEY')
+          } else if (msg.type === 'asr_final' && msg.text !== undefined) {
             voicePendingRef.current = true
+            capturePausedRef.current = true // 回复朗读期间暂停发送，播完自动恢复
             stopAudio()
             mp3ChunksRef.current = []
             optionsRef.current.onFinal(msg.text)
           } else if (msg.type === 'tts_done') {
             playMp3Blob(mp3ChunksRef.current)
             mp3ChunksRef.current = []
+          } else if (msg.type === 'error') {
+            setError(msg.message ?? '语音接口错误')
           }
         } else if (e.data instanceof ArrayBuffer) {
           mp3ChunksRef.current.push(new Uint8Array(e.data))
@@ -399,21 +466,32 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
         if (activeRef.current) runFallbackRecognition()
       }
 
-      // mic -> PCM16 16k -> ws
+      // mic -> AudioWorklet -> PCM16 16k -> ws（16k 原生采样，免重采样）
       const src = ctx.createMediaStreamSource(stream)
-      const proc = ctx.createScriptProcessor(2048, 1, 1)
       const mute = ctx.createGain()
       mute.gain.value = 0
-      src.connect(proc)
-      proc.connect(mute)
       mute.connect(ctx.destination)
-      proc.onaudioprocess = (ev) => {
+
+      const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET], { type: 'application/javascript' }))
+      await ctx.audioWorklet.addModule(blobUrl)
+      URL.revokeObjectURL(blobUrl)
+      if (!activeRef.current) { // 加载 worklet 期间已被 stop：清理退出
+        ws.close()
+        stream.getTracks().forEach(t => t.stop())
+        await ctx.close()
+        return false
+      }
+      const node = new AudioWorkletNode(ctx, 'pcm-processor')
+      node.port.onmessage = (ev) => {
+        if (capturePausedRef.current) return // 朗读播放期间暂停发送，防回声
         if (ws.readyState === WebSocket.OPEN) {
-          const f32 = ev.inputBuffer.getChannelData(0)
+          const f32 = ev.data as Float32Array
           const i16 = resampleToInt16(f32, ctx.sampleRate, 16000)
           ws.send(i16)
         }
       }
+      src.connect(node)
+      node.connect(mute)
       setListening(true)
       return true
     } catch {
@@ -423,10 +501,12 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
   }, [runFallbackRecognition])
 
   const start = useCallback((): void => {
+    if (activeRef.current) return // 已在录音，忽略重复 start（防双击产生多个麦克风流）
     activeRef.current = true
     spokenLenRef.current = 0
     setActive(true)
     setMode('idle')
+    setError(null)
     void startPipeline().then((ok) => {
       if (!ok && activeRef.current) runFallbackRecognition()
     })
@@ -510,5 +590,5 @@ export function useRealtimeVoice(options: RealtimeVoiceOptions): RealtimeVoiceHa
     stopAudio()
   }, [cleanupPipeline])
 
-  return { supported, active, listening, mode, start, stop, setRunning, cancelSpeech }
+  return { supported, active, listening, mode, error, start, stop, setRunning, cancelSpeech }
 }

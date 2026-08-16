@@ -1,0 +1,33 @@
+.mic {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-specific-selector);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.mic:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+}
+
+.mic:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.active {
+  background: var(--dsw-alias-button-danger-fill, #c0392b);
+  color: #fff;
+}
+
+.error {
+  background: var(--dsw-alias-button-danger-fill, #c0392b);
+  color: #fff;
+  outline: 2px solid #e74c3c;
+  outline-offset: 1px;
+}

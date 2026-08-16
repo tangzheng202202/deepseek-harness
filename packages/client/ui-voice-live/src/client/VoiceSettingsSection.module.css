@@ -84,3 +84,15 @@
   background: var(--dsw-alias-interactive-bg-hover-solid);
   color: var(--dsw-alias-label-primary);
 }
+
+.okHint {
+  margin: 0;
+  font-size: 12px;
+  color: #2ecc71;
+}
+
+.errHint {
+  margin: 0;
+  font-size: 12px;
+  color: #e74c3c;
+}

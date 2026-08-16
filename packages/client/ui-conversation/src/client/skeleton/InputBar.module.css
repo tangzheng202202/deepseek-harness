@@ -346,56 +346,6 @@
   cursor: default;
 }
 
-/* Voice input / voice-reply buttons — same chrome as .add. */
-.mic {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 999px;
-  background: var(--dsw-specific-selector);
-  color: var(--dsw-alias-label-primary);
-  cursor: pointer;
-}
-
-.mic:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover-solid);
-}
-
-.mic:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.micListening {
-  background: var(--dsw-alias-button-danger-fill, #c0392b);
-  color: #fff;
-}
-
-.voiceChatOn {
-  background: var(--dsw-alias-button-info-fill);
-  color: #fff;
-}
-
-.voiceSelect {
-  max-width: 92px;
-  height: 28px;
-  padding: 0 4px;
-  border: none;
-  border-radius: 8px;
-  background: var(--dsw-specific-selector);
-  color: var(--dsw-alias-label-primary);
-  font-size: 12px;
-  cursor: pointer;
-  outline: none;
-}
-
-.voiceSelect:hover {
-  background: var(--dsw-alias-interactive-bg-hover-solid);
-}
-
 /* Plan / Read-only / model — native <select>, chip-like closed chrome
    (figma ToggleButton: 13/20 medium secondary, 12px chevron). */
 .select {

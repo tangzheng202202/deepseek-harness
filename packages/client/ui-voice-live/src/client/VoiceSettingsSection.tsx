@@ -1,5 +1,6 @@
 /**
- * "语音交互" settings section: provider + API key + voice + preview.
+ * "语音交互" settings section: provider + voice + preview。
+ * API Key 由后端环境变量提供（阶段 A 起），不再在此填写。
  * Persists through the module-level helpers (localStorage), consumed by the
  * composer's realtime-voice hook.
  */
@@ -7,24 +8,24 @@ import { useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconPlayOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
-  getActiveApiKey, getActiveProvider, getActiveVoice,
-  previewVoice, PROVIDERS, setActiveApiKey, setActiveProvider, setActiveVoice, VOICE_OPTIONS,
-} from '../skeleton/usePipelineVoice.ts'
+  getActiveProvider, getActiveVoice,
+  previewVoice, type PreviewResult, PROVIDERS, setActiveProvider, setActiveVoice, VOICE_OPTIONS,
+} from './usePipelineVoice.ts'
 import css from './VoiceSettingsSection.module.css'
 
 export type VoiceSettingsSectionProps =
-  PropsRuntime<'settings.section'> & PropsLocale<'conversation'>
+  PropsRuntime<'settings.section'> & PropsLocale<'voice'>
 
 export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
   const [provider, setProvider] = useState(getActiveProvider())
-  const [apiKey, setApiKey] = useState(getActiveApiKey())
-  const [showKey, setShowKey] = useState(false)
   const [voice, setVoice] = useState(getActiveVoice())
   const [previewing, setPreviewing] = useState(false)
+  const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
 
   const preview = (): void => {
     setPreviewing(true)
-    void previewVoice(voice, apiKey).finally(() => { setPreviewing(false) })
+    setPreviewResult(null)
+    void previewVoice(voice).then((r) => { setPreviewResult(r) }).finally(() => { setPreviewing(false) })
   }
 
   return (
@@ -41,34 +42,6 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
           {PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
         </select>
       </label>
-
-      <div className={css.field}>
-        <span className={css.label}>{t('voice.apiKey')}</span>
-        <div className={css.keyRow}>
-          <input
-            className={css.input}
-            type={showKey ? 'text' : 'password'}
-            value={apiKey}
-            placeholder={t('voice.apiKeyPlaceholder')}
-            autoComplete="off"
-            spellCheck={false}
-            onChange={(e) => { setApiKey(e.target.value); setActiveApiKey(e.target.value) }}
-          />
-          <button
-            type="button"
-            className={css.eyeButton}
-            aria-label={showKey ? 'hide' : 'show'}
-            onClick={() => { setShowKey(v => !v) }}
-          >
-            <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-              stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M1.5 8s2.4-3.8 6.5-3.8S14.5 8 14.5 8s-2.4 3.8-6.5 3.8S1.5 8 1.5 8Z" />
-              <circle cx="8" cy="8" r="1.8" />
-              {!showKey && <path d="M2.5 13.5 13.5 2.5" />}
-            </svg>
-          </button>
-        </div>
-      </div>
 
       <div className={css.field}>
         <span className={css.label}>{t('voice.voice')}</span>
@@ -91,7 +64,12 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
         </div>
       </div>
 
+      {previewResult !== null && (
+        <p className={previewResult.ok ? css.okHint : css.errHint}>{previewResult.message}</p>
+      )}
+
       <p className={css.hint}>{t('voice.hint')}</p>
+      <p className={css.hint}>{t('voice.backendKeyHint')}</p>
     </div>
   )
 }
