@@ -60,7 +60,7 @@ export class BoundedQueue implements AsyncIterable<Buffer> {
   private drainWaiters(): void {
     let w = this.waiters.shift()
     while (w !== undefined) {
-      w({ value: undefined as unknown as Buffer, done: true })
+      w({ value: undefined, done: true })
       w = this.waiters.shift()
     }
   }
@@ -73,7 +73,7 @@ export class BoundedQueue implements AsyncIterable<Buffer> {
           this.bytes -= item.length
           return Promise.resolve({ value: item, done: false })
         }
-        if (this.ended) return Promise.resolve({ value: undefined as unknown as Buffer, done: true })
+        if (this.ended) return Promise.resolve({ value: undefined, done: true })
         return new Promise((resolve) => {
           this.waiters.push(resolve)
         })

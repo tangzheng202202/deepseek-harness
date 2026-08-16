@@ -40,15 +40,12 @@ export const VOICE_OPTIONS: readonly { id: string; label: string }[] = [
 ]
 export const DEFAULT_VOICE = 'zh_female_vv_uranus_bigtts'
 
-let activeVoice = (typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-voice') : null) ?? DEFAULT_VOICE
-
 export function setActiveVoice(voice: string): void {
-  activeVoice = voice
   if (typeof localStorage !== 'undefined') localStorage.setItem('dsh-voice', voice)
 }
 
 export function getActiveVoice(): string {
-  return activeVoice
+  return (typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-voice') : null) ?? DEFAULT_VOICE
 }
 
 /** 服务商（实际仅火山后端可用）。 */
@@ -56,15 +53,14 @@ export const PROVIDERS: readonly { id: string; label: string }[] = [
   { id: 'volcengine', label: '火山引擎（豆包）' },
 ]
 
-let activeProvider = (typeof localStorage !== 'undefined' ? localStorage.getItem('dsh-voice-provider') : null) ?? 'volcengine'
-
 export function getActiveProvider(): string {
-  return activeProvider
+  return 'volcengine'
 }
 
 export function setActiveProvider(provider: string): void {
-  activeProvider = provider
-  if (typeof localStorage !== 'undefined') localStorage.setItem('dsh-voice-provider', provider)
+  if (provider === 'volcengine' && typeof localStorage !== 'undefined') {
+    localStorage.setItem('dsh-voice-provider', provider)
+  }
 }
 
 /** 试听结果。 */
@@ -72,60 +68,84 @@ export interface PreviewResult { ok: boolean; message: string }
 
 /** 试听：连接后端合成一句示例并播放。key 由后端环境变量提供，前端不传。 */
 export async function previewVoice(voice: string): Promise<PreviewResult> {
-  try {
-    const ws = new WebSocket(WS_URL)
+  return await new Promise<PreviewResult>((resolve) => {
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(WS_URL)
+    } catch (error) {
+      resolve({ ok: false, message: (error as Error).message })
+      return
+    }
     ws.binaryType = 'arraybuffer'
     const chunks: Uint8Array[] = []
-    let hasKey = false
-    let errorMsg = ''
-    const opened = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), 3000)
-      ws.onopen = () => { clearTimeout(timer); resolve(true) }
-      ws.onerror = () => { clearTimeout(timer); resolve(false) }
-    })
-    if (!opened) { ws.close(); return { ok: false, message: '无法连接语音服务（后端未启动）' } }
+    let currentTtsId = ''
+    let settled = false
+    const timeout = setTimeout(() => { finish({ ok: false, message: '试听超时' }) }, 15000)
+    const finish = (result: PreviewResult): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      ws.close()
+      resolve(result)
+    }
 
-    // 完成由事件驱动：tts_done → 播放 → audio ended → 返回。
-    // 全程无固定 sleep；超时兜底 15s。
-    const done = new Promise<PreviewResult>((resolve) => {
-      const timeout = setTimeout(() => { ws.close(); resolve({ ok: false, message: '试听超时' }) }, 15000)
-      const finish = (r: PreviewResult): void => { clearTimeout(timeout); ws.close(); resolve(r) }
-      ws.onmessage = (e) => {
-        if (typeof e.data === 'string') {
-          const msg = JSON.parse(e.data) as { type: string; hasKey?: boolean; message?: string }
-          if (msg.type === 'ready') {
-            hasKey = Boolean(msg.hasKey)
-            if (!hasKey) finish({ ok: false, message: '后端未配置 VOLCENGINE_API_KEY' })
-          } else if (msg.type === 'tts_done') {
-            const audio = playOnce(chunks.splice(0))
-            if (audio === null) finish({ ok: false, message: '未收到合成音频' })
-            else audio.onended = () => finish({ ok: true, message: '试听成功' })
-          } else if (msg.type === 'error') {
-            errorMsg = msg.message ?? '语音接口错误'
-          }
-        } else if (e.data instanceof ArrayBuffer) {
-          chunks.push(new Uint8Array(e.data))
+    ws.onerror = () => { finish({ ok: false, message: '无法连接语音服务（后端未启动）' }) }
+    ws.onclose = () => {
+      if (!settled) finish({ ok: false, message: '语音连接已断开' })
+    }
+    // handler 在握手前安装，避免本机连接很快时漏掉 host 紧随 open 发出的 ready。
+    ws.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        let msg: Record<string, unknown>
+        try {
+          const parsed: unknown = JSON.parse(e.data)
+          if (typeof parsed !== 'object' || parsed === null) return
+          msg = parsed as Record<string, unknown>
+        } catch {
+          return
         }
+        if (msg.type === 'ready') {
+          if (msg.hasKey === false) {
+            finish({ ok: false, message: '后端未配置 VOLCENGINE_API_KEY' })
+            return
+          }
+          const voiceSessionId = typeof msg.voiceSessionId === 'string' ? msg.voiceSessionId : ''
+          ws.send(JSON.stringify({ type: 'config', voiceSessionId, provider: 'volcengine', voice }))
+          ws.send(JSON.stringify({ type: 'tts_push', voiceSessionId, text: '你好，这是你选择的音色，听起来还满意吗？' }))
+          ws.send(JSON.stringify({ type: 'tts_flush', voiceSessionId }))
+        } else if (msg.type === 'tts_start') {
+          currentTtsId = typeof msg.ttsId === 'string' ? msg.ttsId : ''
+        } else if (msg.type === 'tts_done' && msg.ttsId === currentTtsId) {
+          const audio = playOnce(chunks.splice(0), finish)
+          if (audio === null) finish({ ok: false, message: '未收到合成音频' })
+        } else if (msg.type === 'tts_error' || msg.type === 'error') {
+          finish({ ok: false, message: typeof msg.message === 'string' ? msg.message : '语音接口错误' })
+        }
+      } else if (e.data instanceof ArrayBuffer && currentTtsId !== '') {
+        chunks.push(new Uint8Array(e.data))
       }
-    })
-    ws.send(JSON.stringify({ type: 'config', provider: 'volcengine', voice }))
-    ws.send(JSON.stringify({ type: 'tts_push', text: '你好，这是你选择的音色，听起来还满意吗？' }))
-    ws.send(JSON.stringify({ type: 'tts_flush' }))
-    const r = await done
-    if (r.ok && errorMsg) return { ok: false, message: errorMsg }
-    return r
-  } catch (e) {
-    return { ok: false, message: (e as Error).message }
-  }
+    }
+  })
 }
 
-/** 播放一段 mp3，返回 audio 元素（供调用方挂 onended）；无音频返回 null。 */
-function playOnce(chunks: Uint8Array[]): HTMLAudioElement | null {
+/** 播放一段 mp3；结束、解码失败或 autoplay 拒绝都由同一完成路径回收 URL。 */
+function playOnce(
+  chunks: Uint8Array[],
+  finish: (result: PreviewResult) => void,
+): HTMLAudioElement | null {
   if (chunks.length === 0) return null
   const blob = new Blob(chunks as BlobPart[], { type: 'audio/mpeg' })
   const url = URL.createObjectURL(blob)
   const audio = new Audio(url)
-  audio.onended = () => URL.revokeObjectURL(url)
-  void audio.play()
+  let settled = false
+  const done = (result: PreviewResult): void => {
+    if (settled) return
+    settled = true
+    URL.revokeObjectURL(url)
+    finish(result)
+  }
+  audio.onended = () => { done({ ok: true, message: '试听成功' }) }
+  audio.onerror = () => { done({ ok: false, message: '试听音频播放失败' }) }
+  void audio.play().catch(() => { done({ ok: false, message: '浏览器阻止了试听播放' }) })
   return audio
 }

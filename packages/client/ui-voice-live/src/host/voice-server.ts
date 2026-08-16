@@ -74,11 +74,14 @@ class VoiceSession {
   private msgSeq = 0
   private ttsGeneration = 0
   private ttsAbort: AbortController | null = null
+  /** 浏览器当前所在的 DSH 会话（config 消息携带），用于打断时取消 agent 回合。 */
+  private dshSessionId = ''
 
   constructor(
     private readonly ws: WebSocket,
     defaultApiKey: string,
     defaultVoice: string,
+    private readonly cancelAgent?: (dshSessionId: string) => void,
   ) {
     this.apiKey = defaultApiKey
     this.voice = defaultVoice
@@ -87,6 +90,7 @@ class VoiceSession {
   applyConfig(data: Record<string, unknown>): void {
     // API key 只由后端环境变量提供，前端不传、后端不读。
     if (typeof data.voice === 'string' && data.voice) this.voice = data.voice
+    if (typeof data.dshSessionId === 'string' && data.dshSessionId) this.dshSessionId = data.dshSessionId
   }
 
   feedAudio(pcm: Buffer): void {
@@ -130,9 +134,12 @@ class VoiceSession {
         this.acceptingAudio = false
         this.send({ type: 'asr_final', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq })
       },
-      text => this.send({ type: 'asr_partial', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq }),
+      (text) => {
+        this.send({ type: 'asr_partial', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq })
+      },
       (err) => {
         if (this.currentUt === ut) this.currentUt = null
+        this.acceptingAudio = false
         this.send({ type: 'error', voiceSessionId: session, message: `asr: ${err.message}`, sequence: ++this.msgSeq })
       },
       () => {
@@ -229,12 +236,13 @@ class VoiceSession {
     }
   }
 
-  /** 打断当前朗读并令已排队的旧代次任务全部失效。 */
+  /** 打断当前朗读并令已排队的旧代次任务全部失效；同时取消 agent 回合（barge-in）。 */
   cancelTts(): void {
     this.ttsGeneration++
     this.ttsBuf = ''
     this.ttsAbort?.abort()
     this.ttsAbort = null
+    if (this.dshSessionId !== '') this.cancelAgent?.(this.dshSessionId)
   }
 
   /** WebSocket owner 释放时终止所有云端与本地异步资源。 */
@@ -257,6 +265,7 @@ class VoiceSession {
 export function createVoiceUpgrade(
   defaultApiKey: string,
   defaultVoice: string,
+  cancelAgent?: (dshSessionId: string) => void,
 ): { handle: (req: IncomingMessage, socket: Duplex, head: Buffer) => void; close: () => void } {
   const wss = new WebSocketServer({ noServer: true })
 
@@ -265,10 +274,10 @@ export function createVoiceUpgrade(
       ws.close(1008, 'too many connections')
       return
     }
-    const lifetime = setTimeout(() => ws.terminate(), MAX_SESSION_MS)
-    ws.on('close', () => clearTimeout(lifetime))
-    const session = new VoiceSession(ws, defaultApiKey, defaultVoice)
-    ws.once('close', () => session.dispose())
+    const lifetime = setTimeout(() => { ws.terminate() }, MAX_SESSION_MS)
+    ws.on('close', () => { clearTimeout(lifetime) })
+    const session = new VoiceSession(ws, defaultApiKey, defaultVoice, cancelAgent)
+    ws.once('close', () => { session.dispose() })
     ws.send(JSON.stringify({
       type: 'ready',
       voiceSessionId: session.voiceSessionId,
@@ -286,7 +295,7 @@ export function createVoiceUpgrade(
         ? data
         : Array.isArray(data)
           ? Buffer.concat(data)
-          : Buffer.from(data as ArrayBuffer)
+          : Buffer.from(data)
       if (isBinary) {
         if (buf.length > MAX_FRAME_BYTES) return // 异常大帧拒绝
         session.feedAudio(buf)
@@ -294,7 +303,9 @@ export function createVoiceUpgrade(
       }
       if (buf.length > 64 * 1024) return // 控制帧超大拒绝
       try {
-        const msg = JSON.parse(buf.toString('utf8')) as Record<string, unknown>
+        const parsed: unknown = JSON.parse(buf.toString('utf8'))
+        if (typeof parsed !== 'object' || parsed === null) return
+        const msg = parsed as Record<string, unknown>
         // 迟到/乱序消息拒绝：带 voiceSessionId 的控制消息必须属于本会话。
         // （不带 id 的消息向后兼容放行；config 在 ready 前发出，不校验。）
         const isMySession = (m: Record<string, unknown>): boolean =>
@@ -307,12 +318,12 @@ export function createVoiceUpgrade(
           case 'tts_cancel': if (isMySession(msg)) session.cancelTts(); break
           case 'tts_push': {
             if (!isMySession(msg)) break
-            const text = String(msg.text ?? '')
+            const text = typeof msg.text === 'string' ? msg.text : ''
             if (text.length > MAX_TEXT_LEN) return
-            session.pushTts(text, msg.voice as string | undefined)
+            session.pushTts(text, typeof msg.voice === 'string' ? msg.voice : undefined)
             break
           }
-          case 'tts_flush': if (isMySession(msg)) void session.flushTts(msg.voice as string | undefined); break
+          case 'tts_flush': if (isMySession(msg)) void session.flushTts(typeof msg.voice === 'string' ? msg.voice : undefined); break
           default: break
         }
       } catch {

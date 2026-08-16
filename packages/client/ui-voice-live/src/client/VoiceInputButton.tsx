@@ -52,14 +52,20 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
           inputActions.setDraft(text)
           inputActions.submit()
         },
-        onError: message => setError(message),
+        onError: (message) => { setError(message) },
       })
     }
     return controllerRef.current
   }
 
-  const running = useSession(s => s.running) ?? false
-  const partial = useSession(s => s.partial) ?? null
+  const running = useSession(s => s.running)
+  const partial = useSession(s => s.partial)
+  const dshSessionId = useSession(s => s.sessionId) ?? ''
+
+  // 同步当前 DSH 会话 id（随 config 上报，host 端打断时用它取消 agent 回合）。
+  useEffect(() => {
+    controllerRef.current?.setDshSessionId(dshSessionId)
+  }, [dshSessionId])
 
   // 回复朗读：语音回合内，把 partial 正文增量推给后端合成。
   useEffect(() => {

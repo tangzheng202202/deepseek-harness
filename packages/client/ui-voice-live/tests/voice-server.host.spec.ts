@@ -94,7 +94,7 @@ async function setup(): Promise<TestCtx> {
   h.reset()
   const upgrade = createVoiceUpgrade('test-key', 'zh_female_vv_uranus_bigtts')
   const server = createServer()
-  server.on('upgrade', (req, socket, head) => upgrade.handle(req, socket, head))
+  server.on('upgrade', (req, socket, head) => { upgrade.handle(req, socket, head) })
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
   const port = (server.address() as AddressInfo).port
   const client = new WebSocket(`ws://127.0.0.1:${port}/voice`, {
@@ -110,10 +110,10 @@ async function setup(): Promise<TestCtx> {
       client.close()
       await new Promise<void>((r) => {
         if (client.readyState === WebSocket.CLOSED) { r(); return }
-        client.once('close', () => r())
+        client.once('close', () => { r() })
       })
       upgrade.close()
-      await new Promise<void>(r => server.close(() => r()))
+      await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
     },
   }
 }
@@ -129,9 +129,8 @@ function waitForMsg(
       reject(new Error('waitForMsg timeout'))
     }, timeoutMs)
     function onMsg(data: WebSocket.RawData): void {
-      const s = Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
-      let m: Record<string, unknown>
-      try { m = JSON.parse(s) } catch { return }
+      const m = jsonOf(data)
+      if (m === null) return
       if (pred(m)) {
         clearTimeout(timer)
         client.off('message', onMsg)
@@ -155,9 +154,8 @@ function waitForCount(
       reject(new Error(`waitForCount timeout: seen ${seen}/${count}`))
     }, timeoutMs)
     function onMsg(data: WebSocket.RawData): void {
-      const s = Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
-      let m: Record<string, unknown>
-      try { m = JSON.parse(s) } catch { return }
+      const m = jsonOf(data)
+      if (m === null) return
       if (pred(m)) {
         seen++
         if (seen >= count) {
@@ -172,10 +170,23 @@ function waitForCount(
 }
 
 function textOf(data: WebSocket.RawData): string {
-  return Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
+  if (Buffer.isBuffer(data)) return data.toString('utf8')
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
+  return Buffer.from(data).toString('utf8')
 }
 
-afterEach(() => h.reset())
+function jsonOf(data: WebSocket.RawData): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(textOf(data))
+    return typeof parsed === 'object' && parsed !== null
+      ? parsed as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+afterEach(() => { h.reset() })
 
 describe('ASR：50 段音频 exactly-once 有序', () => {
   it('每段恰好一个 final，顺序一致、无重复', async () => {
@@ -184,10 +195,8 @@ describe('ASR：50 段音频 exactly-once 有序', () => {
       const finals: string[] = []
       client.on('message', (data) => {
         if (data instanceof ArrayBuffer || Array.isArray(data)) return
-        try {
-          const m = JSON.parse(textOf(data)) as { type?: string; text?: string }
-          if (m.type === 'asr_final') finals.push(String(m.text))
-        } catch { /* ignore */ }
+        const m = jsonOf(data)
+        if (m?.type === 'asr_final' && typeof m.text === 'string') finals.push(m.text)
       })
 
       for (let i = 0; i < 50; i++) {
@@ -250,12 +259,10 @@ describe('ASR：50 段音频 exactly-once 有序', () => {
       expect(h.asrCalls).toBe(1) // 启动了
       // 取消后不应有 final 事件
       const gotFinal = await new Promise<boolean>((resolve) => {
-        const t = setTimeout(() => resolve(false), 150)
+        const t = setTimeout(() => { resolve(false) }, 150)
         const on = (data: WebSocket.RawData) => {
-          try {
-            const m = JSON.parse(textOf(data))
-            if (m.type === 'asr_final') { clearTimeout(t); client.off('message', on); resolve(true) }
-          } catch { /* ignore */ }
+          const m = jsonOf(data)
+          if (m?.type === 'asr_final') { clearTimeout(t); client.off('message', on); resolve(true) }
         }
         client.on('message', on)
       })
@@ -274,11 +281,9 @@ describe('TTS：多句串行不重叠', () => {
       const starts: string[] = []
       const dones: string[] = []
       client.on('message', (data) => {
-        try {
-          const m = JSON.parse(textOf(data)) as { type?: string; text?: string; ttsId?: string }
-          if (m.type === 'tts_start') starts.push(String(m.text))
-          if (m.type === 'tts_done') dones.push(String(m.ttsId))
-        } catch { /* ignore */ }
+        const m = jsonOf(data)
+        if (m?.type === 'tts_start' && typeof m.text === 'string') starts.push(m.text)
+        if (m?.type === 'tts_done' && typeof m.ttsId === 'string') dones.push(m.ttsId)
       })
       client.send(JSON.stringify({ type: 'tts_push', text: sentences.join('') }))
       client.send(JSON.stringify({ type: 'tts_flush' }))
@@ -326,10 +331,8 @@ describe('畸形 / 超大 / 乱序消息拒绝', () => {
     try {
       let finals = 0
       client.on('message', (data) => {
-        try {
-          const m = JSON.parse(textOf(data))
-          if (m.type === 'asr_final') finals++
-        } catch { /* ignore */ }
+        const m = jsonOf(data)
+        if (m?.type === 'asr_final') finals++
       })
       client.send(voiceFrame())
       client.send(voiceFrame())
@@ -367,10 +370,8 @@ describe('会话隔离', () => {
     try {
       const bFinals: string[] = []
       b.client.on('message', (data) => {
-        try {
-          const m = JSON.parse(textOf(data))
-          if (m.type === 'asr_final') bFinals.push(String(m.text))
-        } catch { /* ignore */ }
+        const m = jsonOf(data)
+        if (m?.type === 'asr_final' && typeof m.text === 'string') bFinals.push(m.text)
       })
       a.client.send(voiceFrame())
       a.client.send(voiceFrame())
@@ -386,11 +387,64 @@ describe('会话隔离', () => {
   })
 })
 
+describe('barge-in：打断触发 agent 取消', () => {
+  it('config 携带 dshSessionId；tts_cancel 时回调取消对应 agent（每连接恰好一次）', async () => {
+    h.reset()
+    const cancelled: string[] = []
+    const upgrade = createVoiceUpgrade('test-key', 'v', (id) => { cancelled.push(id) })
+    const server = createServer()
+    server.on('upgrade', (req, socket, head) => { upgrade.handle(req, socket, head) })
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const client = new WebSocket(`ws://127.0.0.1:${port}/voice`, { origin: `http://127.0.0.1:${port}` })
+    try {
+      const ready = await waitForMsg(client, m => m.type === 'ready')
+      const sessionId = String(ready.voiceSessionId)
+      // config 带 dshSessionId
+      client.send(JSON.stringify({ type: 'config', provider: 'volcengine', voice: 'v', dshSessionId: 'dsh-sess-1' }))
+      await sleep(50)
+      // tts_cancel 触发 agent 取消回调（携带该会话 id）
+      client.send(JSON.stringify({ type: 'tts_cancel', voiceSessionId: sessionId }))
+      await sleep(50)
+      expect(cancelled).toEqual(['dsh-sess-1'])
+      // 重复取消不重复回调（cancelTts 幂等由客户端代次保证，这里只验证一次成功路径）
+      expect(client.readyState).toBe(WebSocket.OPEN)
+    } finally {
+      client.close()
+      upgrade.close()
+      await new Promise<void>(r => server.close(() => { r() }))
+    }
+  })
+
+  it('未携带 dshSessionId 时取消回调不被调用', async () => {
+    h.reset()
+    const cancelled: string[] = []
+    const upgrade = createVoiceUpgrade('test-key', 'v', (id) => { cancelled.push(id) })
+    const server = createServer()
+    server.on('upgrade', (req, socket, head) => { upgrade.handle(req, socket, head) })
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const client = new WebSocket(`ws://127.0.0.1:${port}/voice`, { origin: `http://127.0.0.1:${port}` })
+    try {
+      const ready = await waitForMsg(client, m => m.type === 'ready')
+      client.send(JSON.stringify({ type: 'config', voice: 'v' }))
+      await sleep(50)
+      client.send(JSON.stringify({ type: 'tts_cancel', voiceSessionId: String(ready.voiceSessionId) }))
+      await sleep(50)
+      expect(cancelled).toEqual([])
+    } finally {
+      client.close()
+      upgrade.close()
+      await new Promise<void>(r => server.close(() => { r() }))
+    }
+  })
+})
+
 describe('upgrade 信任（集成级）', () => {
   it('伪造 Host 的 WebSocket upgrade 被 403 拒绝', async () => {
     const upgrade = createVoiceUpgrade('test-key', 'v')
     const server = createServer()
-    server.on('upgrade', (req, socket, head) => upgrade.handle(req, socket, head))
+    server.on('upgrade', (req, socket, head) => { upgrade.handle(req, socket, head) })
     await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
     const port = (server.address() as AddressInfo).port
 
@@ -410,16 +464,16 @@ describe('upgrade 信任（集成级）', () => {
     ].join('\r\n'))
 
     await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('no 403')), 1500)
+      const t = setTimeout(() => { reject(new Error('no 403')) }, 1500)
       const poll = () => {
         if (got.join('').includes('403')) { clearTimeout(t); resolve(); return }
-        setTimeout(poll, 10)
+        setTimeout(() => { poll() }, 10)
       }
       poll()
     })
     raw.destroy()
     upgrade.close()
-    await new Promise<void>(r => server.close(() => r()))
+    await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
   })
 
   it('同源 upgrade 正常握手并收到 ready', async () => {

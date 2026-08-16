@@ -19,6 +19,12 @@
     },
     {
       "path": "../../host/webserver"
+    },
+    {
+      "path": "../../core/agent"
+    },
+    {
+      "path": "../../core/session"
     }
   ]
 }

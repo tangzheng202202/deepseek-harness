@@ -35,7 +35,7 @@ const ASR_URL = 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async'
 // ---------------------------------------------------------------------------
 export class VolcengineVoiceError extends Error {
   code: number | undefined
-  payload: unknown | undefined
+  payload: unknown
 
   constructor(message: string, code?: number, payload?: unknown) {
     super(code !== undefined ? `[${code}] ${message}` : message)
@@ -266,7 +266,10 @@ export class Message {
       if (this.compression === Compression.Gzip) {
         raw = gunzipSync(raw)
       }
-      return JSON.parse(raw.toString('utf-8'))
+      const parsed: unknown = JSON.parse(raw.toString('utf-8'))
+      return typeof parsed === 'object' && parsed !== null
+        ? parsed as Record<string, unknown>
+        : null
     } catch {
       return null
     }
@@ -341,9 +344,9 @@ async function openWS(
   if (signal?.aborted === true) throw new VolcengineVoiceError('operation aborted')
   const ws = new WebSocket(url, { headers, maxPayload: 16 * 1024 * 1024 })
   const stream = new MessageStream()
-  const abort = (): void => ws.terminate()
+  const abort = (): void => { ws.terminate() }
   signal?.addEventListener('abort', abort, { once: true })
-  ws.once('close', () => signal?.removeEventListener('abort', abort))
+  ws.once('close', () => { signal?.removeEventListener('abort', abort) })
 
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -356,7 +359,7 @@ async function openWS(
     })
     ws.once('error', (err) => {
       clearTimeout(timer)
-      const s = String((err as Error)?.message ?? err)
+      const s = err.message
       if (/401|403|auth/i.test(s)) {
         reject(new VolcengineVoiceError(`handshake rejected: ${s}`))
       } else {
@@ -390,10 +393,10 @@ async function openWS(
       stream.push(new VolcengineVoiceError(`malformed server frame: ${(e as Error).message}`))
     }
   })
-  ws.on('close', () => stream.close(new VolcengineVoiceError('connection closed')))
-  ws.on('error', err =>
-    stream.close(new VolcengineVoiceError(`connection error: ${(err as Error)?.message ?? err}`)),
-  )
+  ws.on('close', () => { stream.close(new VolcengineVoiceError('connection closed')) })
+  ws.on('error', (err) => {
+    stream.close(new VolcengineVoiceError(`connection error: ${err.message}`))
+  })
 
   return { ws, stream }
 }
@@ -402,7 +405,7 @@ async function recv(stream: MessageStream, timeoutMs: number): Promise<Message> 
   let timer: NodeJS.Timeout | undefined
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new VolcengineVoiceError(`timed out waiting for server frame (${timeoutMs}ms)`)),
+      () => { reject(new VolcengineVoiceError(`timed out waiting for server frame (${timeoutMs}ms)`)) },
       timeoutMs,
     )
   })
@@ -506,7 +509,7 @@ export async function ttsStream(
     assertNoServerError(msg)
     if (msg.event !== Event.ConnectionStarted) {
       throw new VolcengineVoiceError(
-        `expected ConnectionStarted, got ${Event[msg.event] ?? msg.event}`,
+        `expected ConnectionStarted, got ${Event[msg.event]}`,
       )
     }
 
@@ -528,7 +531,7 @@ export async function ttsStream(
     assertNoServerError(msg)
     if (msg.event !== Event.SessionStarted) {
       throw new VolcengineVoiceError(
-        `expected SessionStarted, got ${Event[msg.event] ?? msg.event}`,
+        `expected SessionStarted, got ${Event[msg.event]}`,
       )
     }
 
@@ -663,9 +666,9 @@ export interface AsrStreamOptions {
 /** 火山双向流式的句末在最后一个 utterance.definite，而非稳定存在的顶层 is_final。 */
 export function isDefiniteAsrResult(result: Record<string, unknown>): boolean {
   if (result.is_final === true) return true
-  const utterances = result.utterances
+  const utterances: unknown[] = result.utterances as unknown[]
   if (!Array.isArray(utterances) || utterances.length === 0) return false
-  const last = utterances.at(-1)
+  const last: unknown = utterances[utterances.length - 1]
   return typeof last === 'object' && last !== null
     && (last as Record<string, unknown>).definite === true
 }
@@ -687,7 +690,7 @@ async function* chunkSource(
   // Async iterable
   let buf = Buffer.alloc(0)
   for await (const chunk of source) {
-    if (!chunk || !chunk.length) continue
+    if (chunk.length === 0) continue
     buf = Buffer.concat([buf, chunk])
     while (buf.length >= segmentBytes) {
       yield buf.subarray(0, segmentBytes)
@@ -765,9 +768,11 @@ export async function asrStream(
     payload: gzipSync(Buffer.from(JSON.stringify(initPayload), 'utf-8')),
   })
 
-  let recvError: Error | null = null
-  // 共享终止标志：receiver 收到最终结果时置位并中断持续流（BoundedQueue.abort）。
-  let finished = false
+  // 并发 sender/receiver 的共享状态放在对象内，避免任一闭包持有过期快照。
+  const state: { recvError: Error | null; finished: boolean } = {
+    recvError: null,
+    finished: false,
+  }
 
   // Receiver: runs concurrently with the sender, emits results to onText.
   const receiver = (async () => {
@@ -792,7 +797,7 @@ export async function asrStream(
             }
             onText(out)
             if (isFinal || (msg.flag & Flags.LastNoSeq)) {
-              finished = true
+              state.finished = true
               // 服务端端点检测已断句：中断持续音频流，让 sender 尽快退出。
               const q = pcmSource as { abort?: () => void } | null
               q?.abort?.()
@@ -804,7 +809,7 @@ export async function asrStream(
         }
       }
     } catch (e) {
-      if (signal?.aborted !== true) recvError = e as Error
+      if (signal?.aborted !== true) state.recvError = e as Error
     }
   })()
 
@@ -816,7 +821,7 @@ export async function asrStream(
 
     let prev: Buffer | null = null
     for await (const chunk of chunkSource(pcmSource, segmentBytes)) {
-      if (finished) break
+      if (state.finished) break
       if (prev !== null) {
         send(
           ws,
@@ -834,7 +839,7 @@ export async function asrStream(
       prev = chunk
     }
 
-    if (!finished && signal?.aborted !== true) {
+    if (!state.finished && signal?.aborted !== true) {
       const finalBytes = prev ?? Buffer.alloc(0)
       send(
         ws,
@@ -849,14 +854,14 @@ export async function asrStream(
       )
     }
   } catch (e) {
-    if (signal?.aborted !== true) recvError = recvError ?? (e as Error)
+    if (signal?.aborted !== true && state.recvError === null) state.recvError = e as Error
     ws.terminate()
   }
 
   try {
     if (signal?.aborted === true) ws.terminate()
     await receiver
-    if (recvError) throw recvError
+    if (state.recvError !== null) throw state.recvError
   } finally {
     try {
       ws.close()

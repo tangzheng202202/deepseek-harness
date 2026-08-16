@@ -1,8 +1,7 @@
 /**
  * "语音交互" settings section: provider + voice + preview。
  * API Key 由后端环境变量提供（阶段 A 起），不再在此填写。
- * Persists through the module-level helpers (localStorage), consumed by the
- * composer's realtime-voice hook.
+ * Persists through localStorage helpers with no module-global lifecycle state.
  */
 import { useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'

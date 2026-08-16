@@ -104,7 +104,7 @@ class AudioCapture {
     try { this.node?.port.close() } catch { /* already closed */ }
     this.node?.disconnect()
     this.node = null
-    this.stream?.getTracks().forEach(t => t.stop())
+    this.stream?.getTracks().forEach((track) => { track.stop() })
     this.stream = null
     void this.ctx?.close().catch(() => {})
     this.ctx = null
@@ -222,13 +222,15 @@ export class VoiceController {
   private replyTimer: ReturnType<typeof setTimeout> | null = null
   /** 同一语音会话已经提交的 utterance，抵御重复 final。 */
   private readonly submittedUtterances = new Set<string>()
+  /** 当前 DSH 会话 id（随 config 上报，host 端打断时用它取消 agent 回合）。 */
+  private dshSessionId = ''
 
   private static readonly STOP_TIMEOUT_MS = 3000
   /** 应答模式空闲兜底：超过该时长无合成活动强制关闭。 */
   private static readonly REPLY_TIMEOUT_MS = 120_000
 
   constructor(private readonly callbacks: VoiceCallbacks) {
-    this.playback.onIdle = () => this.maybeFinishReply()
+    this.playback.onIdle = () => { this.maybeFinishReply() }
   }
 
   get currentState(): VoiceState {
@@ -237,6 +239,11 @@ export class VoiceController {
 
   get isActive(): boolean {
     return this.active
+  }
+
+  /** 同步当前 DSH 会话 id（随 config 上报，供 host 端打断时取消 agent）。 */
+  setDshSessionId(id: string): void {
+    this.dshSessionId = id
   }
 
   private setState(s: VoiceState): void {
@@ -271,7 +278,7 @@ export class VoiceController {
       const ok = await this.connect(gen)
       // stop/cancel 已发生（active=false）时静默退出，不报错
       if (!ok) {
-        if (this.active) this.fail('无法连接语音服务（后端未启动）')
+        if (gen === this.generation) this.fail('无法连接语音服务（后端未启动）')
         return
       }
       this.setState('listening')
@@ -289,9 +296,14 @@ export class VoiceController {
       ws.onopen = () => {
         clearTimeout(timer)
         if (gen !== this.generation) { ws.close(); return } // 已 stop/cancel
-        ws.send(JSON.stringify({ type: 'config', provider: 'volcengine', voice: localStorage.getItem('dsh-voice') ?? 'zh_female_vv_uranus_bigtts' }))
+        ws.send(JSON.stringify({
+          type: 'config',
+          provider: 'volcengine',
+          voice: localStorage.getItem('dsh-voice') ?? 'zh_female_vv_uranus_bigtts',
+          ...(this.dshSessionId !== '' ? { dshSessionId: this.dshSessionId } : {}),
+        }))
       }
-      ws.onmessage = e => this.onMessage(gen, e)
+      ws.onmessage = (event) => { this.onMessage(gen, event) }
       ws.onclose = () => {
         clearTimeout(timer)
         // 连接未完成即关闭：必须 resolve，否则 start 挂起
@@ -314,19 +326,23 @@ export class VoiceController {
     if (typeof e.data === 'string') {
       let msg: Record<string, unknown>
       try {
-        msg = JSON.parse(e.data) as Record<string, unknown>
+        const parsed: unknown = JSON.parse(e.data)
+        if (typeof parsed !== 'object' || parsed === null) return
+        msg = parsed as Record<string, unknown>
       } catch {
         return
       }
       if (msg.type === 'ready') {
-        this.voiceSessionId = String(msg.voiceSessionId ?? '')
+        this.voiceSessionId = typeof msg.voiceSessionId === 'string' ? msg.voiceSessionId : ''
         if (msg.hasKey === false) {
           this.readyResolve?.(false)
           this.readyResolve = null
           this.fail('后端未配置 VOLCENGINE_API_KEY')
           return
         }
-        this.ws?.send(JSON.stringify({ type: 'asr_start', voiceSessionId: this.voiceSessionId }))
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ type: 'asr_start', voiceSessionId: this.voiceSessionId }))
+        }
         this.readyResolve?.(true)
         this.readyResolve = null
         return
@@ -349,23 +365,23 @@ export class VoiceController {
       if (msg.type === 'asr_partial' && typeof msg.text === 'string') {
         this.callbacks.onPartial(msg.text)
       } else if (msg.type === 'tts_start') {
-        this.currentTtsId = String(msg.ttsId ?? '')
+        this.currentTtsId = typeof msg.ttsId === 'string' ? msg.ttsId : ''
         this.setState('synthesizing')
       } else if (msg.type === 'tts_done') {
-        const ttsId = String(msg.ttsId ?? '')
+        const ttsId = typeof msg.ttsId === 'string' ? msg.ttsId : ''
         this.playback.complete(ttsId)
         if (this.currentTtsId === ttsId) this.currentTtsId = ''
         this.setState(this.capturing ? 'listening' : 'playing')
       } else if (msg.type === 'tts_error') {
-        const ttsId = String(msg.ttsId ?? '')
+        const ttsId = typeof msg.ttsId === 'string' ? msg.ttsId : ''
         this.playback.discard(ttsId)
         if (this.currentTtsId === ttsId) this.currentTtsId = ''
-        this.callbacks.onError(String(msg.message ?? 'TTS 失败'))
+        this.callbacks.onError(typeof msg.message === 'string' ? msg.message : 'TTS 失败')
       } else if (msg.type === 'tts_idle') {
         this.replyServerIdle = true
         this.maybeFinishReply()
       } else if (msg.type === 'error') {
-        this.callbacks.onError(String(msg.message ?? '语音接口错误'))
+        this.callbacks.onError(typeof msg.message === 'string' ? msg.message : '语音接口错误')
       }
     } else if (e.data instanceof ArrayBuffer && this.currentTtsId !== '') {
       // 二进制 = TTS 音频分片，按当前 ttsId 累积
@@ -382,7 +398,7 @@ export class VoiceController {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'asr_end', voiceSessionId: this.voiceSessionId }))
       // 等待 asr_final（提交后进入应答模式）；超时兜底关闭
-      this.stopTimer = setTimeout(() => this.teardown(), VoiceController.STOP_TIMEOUT_MS)
+      this.stopTimer = setTimeout(() => { this.teardown() }, VoiceController.STOP_TIMEOUT_MS)
     } else {
       this.teardown()
     }
@@ -453,7 +469,7 @@ export class VoiceController {
 
   private armReplyTimer(): void {
     if (this.replyTimer !== null) clearTimeout(this.replyTimer)
-    this.replyTimer = setTimeout(() => this.teardown(), VoiceController.REPLY_TIMEOUT_MS)
+    this.replyTimer = setTimeout(() => { this.teardown() }, VoiceController.REPLY_TIMEOUT_MS)
   }
 
   private clearReplyTimer(): void {

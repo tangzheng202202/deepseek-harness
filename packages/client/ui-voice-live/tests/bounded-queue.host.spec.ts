@@ -25,10 +25,18 @@ describe('BoundedQueue', () => {
 
   it('push after end/abort is refused', () => {
     const q = new BoundedQueue()
+    expect(q.isEnded).toBe(false)
+    expect(q.isAborted).toBe(false)
+    expect(q.size).toBe(0)
     q.end()
+    q.end()
+    expect(q.isEnded).toBe(true)
     expect(q.push(Buffer.from([1]))).toBe(false)
     const a = new BoundedQueue()
     a.abort()
+    a.abort()
+    expect(a.isAborted).toBe(true)
+    expect(a.size).toBe(0)
     expect(a.push(Buffer.from([1]))).toBe(false)
   })
 

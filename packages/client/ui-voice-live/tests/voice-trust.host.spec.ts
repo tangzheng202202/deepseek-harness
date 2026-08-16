@@ -38,6 +38,7 @@ describe('isTrustedVoiceRequest', () => {
 
   it('refuses a missing Host', () => {
     expect(isTrustedVoiceRequest(req({}))).toBe(false)
+    expect(isTrustedVoiceRequest(req({ host: '[' }))).toBe(false)
   })
 
   it('refuses cross-site markers and cross-origin Origin even on a loopback Host', () => {

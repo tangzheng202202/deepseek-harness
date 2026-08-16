@@ -120,7 +120,8 @@ function installFakes(): void {
         return () => { urls.push(`blob:${urls.length}`); return urls[urls.length - 1] ?? '' }
       }
       if (prop === 'revokeObjectURL') return () => {}
-      return Reflect.get(target, prop, receiver)
+      const value: unknown = Reflect.get(target, prop, receiver)
+      return value
     },
   })
   vi.stubGlobal('URL', URLWithObjectURL)
@@ -488,6 +489,20 @@ describe('无泄漏', () => {
   })
 })
 
+describe('barge-in：会话 id 上报', () => {
+  it('setDshSessionId 后 config 消息携带 dshSessionId', async () => {
+    const { c } = makeController()
+    c.setDshSessionId('dsh-sess-42')
+    const ws = await startReady(c)
+    const config = ws.sent.find(s => typeof s === 'string' && s.includes('"config"'))
+    expect(config).toBeDefined()
+    expect(String(config)).toContain('"dshSessionId":"dsh-sess-42"')
+    expect(FakeWS.alive.length).toBe(1)
+    c.cancel()
+    expect(FakeWS.alive.length).toBe(0)
+  })
+})
+
 describe('试听 previewVoice', () => {
   it('由 tts_done + audio ended 完成，无固定 sleep', async () => {
     vi.useFakeTimers()
@@ -496,6 +511,7 @@ describe('试听 previewVoice', () => {
     ws.__open()
     await flush() // 等 previewVoice 注册 onmessage
     ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1' }))
     ws.__msg(new ArrayBuffer(8))
     ws.__msg(new ArrayBuffer(8))
     ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
