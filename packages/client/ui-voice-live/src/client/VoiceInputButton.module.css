@@ -71,3 +71,29 @@
     opacity: 0;
   }
 }
+
+/* 麦克风按钮容器：字幕浮层定位锚点。 */
+.wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* 实时字幕：识别中的 asr_partial 悬浮显示在按钮上方。 */
+.caption {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 320px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 30;
+}

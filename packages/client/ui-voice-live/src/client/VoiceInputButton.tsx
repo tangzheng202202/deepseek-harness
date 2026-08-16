@@ -37,6 +37,8 @@ function replyTextOf(p: PartialAssistant | null): string {
 export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButtonProps) {
   const [state, setState] = useState<VoiceState>('idle')
   const [error, setError] = useState<string | null>(null)
+  /** 实时字幕：识别中把 asr_partial 悬浮显示在麦克风按钮上方。 */
+  const [caption, setCaption] = useState('')
   const controllerRef = useRef<VoiceController | null>(null)
   /** 当前回合是否由语音发起（决定是否朗读回复）。 */
   const voiceTurnRef = useRef(false)
@@ -47,10 +49,14 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
     if (controllerRef.current === null) {
       controllerRef.current = new VoiceController({
         onState: setState,
-        onPartial: (text) => { inputActions.setDraft(text) },
+        onPartial: (text) => {
+          inputActions.setDraft(text)
+          setCaption(text)
+        },
         onFinal: (text) => {
           voiceTurnRef.current = true // 语音发起回合：回复要朗读
           inputActions.setDraft(text)
+          setCaption('')
           inputActions.submit()
         },
         onError: (message) => { setError(message) },
@@ -99,33 +105,38 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
   const tooltip = error ?? (active ? t('voice.micActive') : t('voice.mic'))
 
   return (
-    <Tooltip label={tooltip} side="top" delayMs={500}>
-      <button
-        type="button"
-        className={clsx(css.mic, active && css.active, error && css.error)}
-        aria-label={error ?? t('voice.mic')}
-        aria-pressed={active}
-        onClick={() => {
-          setError(null)
-          const c = controller()
-          if (c.isActive) c.stop()
-          else void c.start()
-        }}
-      >
-        {active ? (
-          <span className={css.orb} aria-hidden>
-            <span className={css.orbCore} />
-            <span className={css.orbRing} />
-            <span className={css.orbRing} />
-          </span>
-        ) : (
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
-            <path d="M8 1a2.5 2.5 0 0 1 2.5 2.5v3a2.5 2.5 0 1 1-5 0v-3A2.5 2.5 0 0 1 8 1Z" fill="currentColor" />
-            <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0h-1.5a3 3 0 0 1-6 0h-1.5Z" fill="currentColor" />
-            <path d="M8 11.75a4.25 4.25 0 0 1-4.25-4.25H2.25A5.75 5.75 0 0 0 7.25 13.2V15h1.5v-1.8a5.75 5.75 0 0 0 5-5.7h-1.5A4.25 4.25 0 0 1 8 11.75Z" fill="currentColor" />
-          </svg>
-        )}
-      </button>
-    </Tooltip>
+    <div className={css.wrap}>
+      {active && caption !== '' && (
+        <span className={css.caption} aria-hidden>{caption}</span>
+      )}
+      <Tooltip label={tooltip} side="top" delayMs={500}>
+        <button
+          type="button"
+          className={clsx(css.mic, active && css.active, error && css.error)}
+          aria-label={error ?? t('voice.mic')}
+          aria-pressed={active}
+          onClick={() => {
+            setError(null)
+            const c = controller()
+            if (c.isActive) c.stop()
+            else void c.start()
+          }}
+        >
+          {active ? (
+            <span className={css.orb} aria-hidden>
+              <span className={css.orbCore} />
+              <span className={css.orbRing} />
+              <span className={css.orbRing} />
+            </span>
+          ) : (
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+              <path d="M8 1a2.5 2.5 0 0 1 2.5 2.5v3a2.5 2.5 0 1 1-5 0v-3A2.5 2.5 0 0 1 8 1Z" fill="currentColor" />
+              <path d="M3.5 7.5a4.5 4.5 0 0 0 9 0h-1.5a3 3 0 0 1-6 0h-1.5Z" fill="currentColor" />
+              <path d="M8 11.75a4.25 4.25 0 0 1-4.25-4.25H2.25A5.75 5.75 0 0 0 7.25 13.2V15h1.5v-1.8a5.75 5.75 0 0 0 5-5.7h-1.5A4.25 4.25 0 0 1 8 11.75Z" fill="currentColor" />
+            </svg>
+          )}
+        </button>
+      </Tooltip>
+    </div>
   )
 }
