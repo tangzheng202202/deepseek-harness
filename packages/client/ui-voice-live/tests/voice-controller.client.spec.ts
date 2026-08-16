@@ -544,6 +544,82 @@ describe('barge-in：会话 id 上报', () => {
   })
 })
 
+describe('自动重连（单重连器）', () => {
+  it('listening 中断开 → 退避后重连成功，采集恢复', async () => {
+    vi.useFakeTimers()
+    const { c } = makeController()
+    const ws1 = await startReady(c)
+    expect(FakeWS.instances.length).toBe(1)
+
+    ws1.close() // 连接断开
+    expect(c.currentState).toBe('reconnecting')
+    expect(FakeWS.instances.length).toBe(1) // 还没发起新连接（退避中）
+
+    await vi.advanceTimersByTimeAsync(1000) // 退避到期 → 新连接
+    expect(FakeWS.instances.length).toBe(2)
+    const ws2 = lastWS()
+    expect(c.currentState).toBe('reconnecting')
+    ws2.__open()
+    ws2.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's2', hasKey: true }))
+    await flush() // doReconnect 的 await 链
+    expect(c.currentState).toBe('listening')
+
+    // 采集恢复：mic 帧发往新连接
+    emitMicFrame()
+    expect(ws2.sent.at(-1)).toBeInstanceOf(Int16Array)
+    expect(FakeWS.alive.length).toBe(1)
+    c.cancel()
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('退避窗口内断开事件不会创建第二个重连器', async () => {
+    vi.useFakeTimers()
+    const { c } = makeController()
+    const ws1 = await startReady(c)
+    ws1.close()
+    // 未到退避期：不应有任何新连接
+    await vi.advanceTimersByTimeAsync(500)
+    expect(FakeWS.instances.length).toBe(1)
+    // 到点只创建一个
+    await vi.advanceTimersByTimeAsync(500)
+    expect(FakeWS.instances.length).toBe(2)
+    expect(FakeWS.alive.length).toBe(1) // 旧连接已关，新连接在途
+    lastWS().__open()
+    lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    expect(FakeWS.alive.length).toBe(1)
+    c.cancel()
+  })
+
+  it('重连失败达到上限 → failed', async () => {
+    vi.useFakeTimers()
+    const { c, cb } = makeController()
+    const ws1 = await startReady(c)
+    ws1.close()
+    // 反复：退避 → 连接超时（3s connect timer）→ 再退避…… 共 5 次尝试
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(16_000) // 覆盖退避 + connect 超时
+    }
+    expect(cb.onError).toHaveBeenCalled()
+    expect(String(cb.onError.mock.calls.at(-1)?.[0] ?? '')).toContain('重连失败')
+    // failed 是 fail() 的中间态（onState 先收到 failed，随后 teardown 回 idle）
+    expect(cb.onState.mock.calls.some(call => call[0] === 'failed')).toBe(true)
+    expect(c.currentState).toBe('idle')
+    expect(FakeWS.alive.length).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('用户 stop（closing）后的断开不触发重连', async () => {
+    vi.useFakeTimers()
+    const { c, cb } = makeController()
+    const ws1 = await startReady(c)
+    c.stop() // closing：等 final
+    ws1.close() // 连接断开（非用户预期路径）
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(FakeWS.instances.length).toBe(1) // 无新连接
+    expect(cb.onError).not.toHaveBeenCalled()
+  })
+})
+
 describe('试听 previewVoice', () => {
   it('由 tts_done + audio ended 完成，无固定 sleep', async () => {
     vi.useFakeTimers()

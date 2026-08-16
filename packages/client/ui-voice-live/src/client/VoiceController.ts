@@ -242,10 +242,18 @@ export class VoiceController {
   private readonly submittedUtterances = new Set<string>()
   /** 当前 DSH 会话 id（随 config 上报，host 端打断时用它取消 agent 回合）。 */
   private dshSessionId = ''
+  /** 自动重连（单重连器）：任意时刻至多一个在途尝试/一个退避定时器。 */
+  private reconnectAttempts = 0
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectInFlight = false
 
   private static readonly STOP_TIMEOUT_MS = 3000
   /** 应答模式空闲兜底：超过该时长无合成活动强制关闭。 */
   private static readonly REPLY_TIMEOUT_MS = 120_000
+  /** 重连退避起点（ms），每次失败翻倍直至上限。 */
+  private static readonly RECONNECT_BASE_MS = 1000
+  /** 单次重连失败上限；超过后进入 failed。 */
+  private static readonly MAX_RECONNECT_ATTEMPTS = 5
 
   constructor(
     private readonly callbacks: VoiceCallbacks,
@@ -294,7 +302,9 @@ export class VoiceController {
     this.setState('acquiring')
     try {
       const capture = new AudioCapture((i16) => {
-        if (gen !== this.generation || !this.capturing) return // 旧代次/非采集态丢弃
+        // 不绑定启动代次：重连会递增 generation，而采集器应跟随
+        // 当前会话（capturing/active 状态已隔离 ABA 竞态）。
+        if (!this.capturing || !this.active) return
         if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(i16)
       }, this.echoCancellation)
       await capture.start()
@@ -337,7 +347,8 @@ export class VoiceController {
         this.readyResolve = null
         if (gen === this.generation) {
           this.capturing = false
-          if (this.active) this.fail('语音连接已断开')
+          // 用户 stop/cancel 或正在应答时由 teardown 负责关闭；其余情况自动重连
+          if (this.active && this.state !== 'closing') this.scheduleReconnect()
         }
       }
       ws.onerror = () => { clearTimeout(timer); resolve(false) }
@@ -345,6 +356,50 @@ export class VoiceController {
       this.ws = ws
       this.readyResolve = resolve
     })
+  }
+
+  /* ---- 自动重连（单重连器） ---- */
+
+  private scheduleReconnect(): void {
+    if (this.reconnectInFlight || this.reconnectTimer !== null) return // 单重连器
+    this.reconnectAttempts++
+    const delay = Math.min(
+      VoiceController.RECONNECT_BASE_MS * 2 ** (this.reconnectAttempts - 1),
+      10_000,
+    )
+    this.setState('reconnecting')
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      this.reconnectInFlight = true
+      void this.doReconnect()
+    }, delay)
+  }
+
+  private async doReconnect(): Promise<void> {
+    try {
+      const gen = ++this.generation // 旧代次消息失效
+      const ok = await this.connect(gen)
+      this.reconnectInFlight = false
+      if (!ok) {
+        if (this.reconnectAttempts >= VoiceController.MAX_RECONNECT_ATTEMPTS) {
+          this.fail('语音连接已断开，重连失败')
+          return
+        }
+        this.scheduleReconnect() // 继续退避
+        return
+      }
+      // 重连成功：恢复采集
+      this.reconnectAttempts = 0
+      this.capturing = true
+      this.setState('listening')
+    } catch {
+      this.reconnectInFlight = false
+      if (this.reconnectAttempts >= VoiceController.MAX_RECONNECT_ATTEMPTS) {
+        this.fail('语音连接已断开，重连失败')
+      } else {
+        this.scheduleReconnect()
+      }
+    }
   }
 
   private onMessage(gen: number, e: MessageEvent): void {
@@ -516,6 +571,7 @@ export class VoiceController {
     this.generation++ // 使所有在途消息失效
     this.clearStopTimer()
     this.clearReplyTimer()
+    this.clearReconnect()
     this.replyMode = false
     this.replyDone = false
     this.replyServerIdle = false
@@ -528,6 +584,15 @@ export class VoiceController {
     this.submittedUtterances.clear()
     this.playback.stop()
     this.setState('idle')
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    this.reconnectInFlight = false
+    this.reconnectAttempts = 0
   }
 
   private fail(message: string): void {
