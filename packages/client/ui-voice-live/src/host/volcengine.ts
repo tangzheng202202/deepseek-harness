@@ -634,6 +634,10 @@ export interface AsrStreamOptions {
   showUtterances?: boolean
   /** Audio segment duration per frame in ms. Default 200. */
   segmentDurationMs?: number
+  /** 服务端端点检测（静音断句）窗口 ms（end_window_size）。设置后走真流式：持续发音频，服务端在静音超时后返回 definite final。 */
+  endpointingMs?: number
+  /** 端点检测前的最短语音时长 ms（force_to_speech_time），防误断。需与 endpointingMs 同用。 */
+  minSpeechMs?: number
   /** X-Api-Resource-Id. Default "volc.bigasr.sauc.duration". */
   resourceId?: string
   requestId?: string
@@ -683,6 +687,8 @@ export async function asrStream(
     enableDdc = true,
     showUtterances = true,
     segmentDurationMs = 200,
+    endpointingMs,
+    minSpeechMs,
     resourceId = 'volc.bigasr.sauc.duration',
     requestId,
     timeoutMs = 30000,
@@ -712,6 +718,9 @@ export async function asrStream(
       enable_ddc: enableDdc,
       show_utterances: showUtterances,
       enable_nonstream: false,
+      // 服务端端点检测：静音超时自动断句（输出 definite），客户端能量 VAD 不再决定句界。
+      ...(endpointingMs !== undefined ? { end_window_size: endpointingMs } : {}),
+      ...(minSpeechMs !== undefined ? { force_to_speech_time: minSpeechMs } : {}),
     },
   }
 
@@ -728,6 +737,8 @@ export async function asrStream(
   })
 
   let recvError: Error | null = null
+  // 共享终止标志：receiver 收到最终结果时置位并中断持续流（BoundedQueue.abort）。
+  let finished = false
 
   // Receiver: runs concurrently with the sender, emits results to onText.
   const receiver = (async () => {
@@ -752,6 +763,10 @@ export async function asrStream(
             }
             onText(out)
             if (isFinal || (msg.flag & Flags.LastNoSeq)) {
+              finished = true
+              // 服务端端点检测已断句：中断持续音频流，让 sender 尽快退出。
+              const q = pcmSource as { abort?: () => void } | null
+              q?.abort?.()
               return
             }
           } else if (msg.flag & Flags.LastNoSeq) {
@@ -764,13 +779,15 @@ export async function asrStream(
     }
   })()
 
-  // Sender: init frame, then audio chunks, then final (NegativeSeq) frame.
+  // Sender: init frame, then audio chunks; final NegativeSeq only when the
+  // server has not yet endpointed (i.e. the source ended first).
   try {
     send(ws, initMsg)
     seq += 1
 
     let prev: Buffer | null = null
     for await (const chunk of chunkSource(pcmSource, segmentBytes)) {
+      if (finished) break
       if (prev !== null) {
         send(
           ws,
@@ -788,18 +805,20 @@ export async function asrStream(
       prev = chunk
     }
 
-    const finalBytes = prev ?? Buffer.alloc(0)
-    send(
-      ws,
-      new Message({
-        type: MsgType.AudioOnlyClient,
-        flag: Flags.NegativeSeq,
-        serialization: Serialization.JSON,
-        compression: Compression.Gzip,
-        sequence: -seq,
-        payload: gzipSync(finalBytes),
-      }),
-    )
+    if (!finished) {
+      const finalBytes = prev ?? Buffer.alloc(0)
+      send(
+        ws,
+        new Message({
+          type: MsgType.AudioOnlyClient,
+          flag: Flags.NegativeSeq,
+          serialization: Serialization.JSON,
+          compression: Compression.Gzip,
+          sequence: -seq,
+          payload: gzipSync(finalBytes),
+        }),
+      )
+    }
   } catch (e) {
     recvError = recvError ?? (e as Error)
   }

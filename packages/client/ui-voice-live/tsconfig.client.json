@@ -10,13 +10,18 @@
     "src/client/apply.ts",
     "src/client/locales.ts",
     "src/client/usePipelineVoice.ts",
+    "src/client/VoiceController.ts",
     "src/client/VoiceInputButton.tsx",
     "src/client/VoiceSettingsSection.tsx",
+    "src/invariant.ts",
     "src/css-modules.d.ts"
   ],
   "references": [
     {
       "path": "../../../vendor/cordis"
+    },
+    {
+      "path": "../../runtime-diagnostics/invariants"
     },
     {
       "path": "../ui-slots"

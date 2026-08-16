@@ -1,26 +1,33 @@
 /**
- * Host-side WebSocket voice endpoint: browser mic PCM -> Volcengine ASR, and
- * browser reply text -> Volcengine TTS. Mirrors the Python `voice_server.py`
- * session protocol so the client side needs no protocol change.
+ * Host-side WebSocket voice endpoint: browser mic PCM -> Volcengine streaming
+ * ASR (server-side endpointing), browser reply text -> Volcengine TTS.
  *
- * Wire protocol (browser <-> this endpoint, one WebSocket):
+ * Protocol (browser <-> this endpoint, one WebSocket):
  *   browser -> host:  binary = 16kHz Int16 mono mic PCM
  *                     {"type":"config","provider","voice"}
- *                     {"type":"tts_push","text"}  /  {"type":"tts_flush"}
- *                     {"type":"asr_end"}
- *   host -> browser:  {"type":"ready",...} / {"type":"asr_final","text"}
- *                     {"type":"tts_start","text"} + binary mp3 + {"type":"tts_done"}
+ *                     {"type":"asr_end","voiceSessionId"}   normal stop, await final
+ *                     {"type":"asr_cancel","voiceSessionId"} discard
+ *                     {"type":"tts_push","text"} / {"type":"tts_flush"}
+ *   host -> browser:  {"type":"ready","voiceSessionId",...}
+ *                     {"type":"asr_partial","voiceSessionId","utteranceId","text","sequence"}
+ *                     {"type":"asr_final","voiceSessionId","utteranceId","text","sequence"}
+ *                     {"type":"tts_start","ttsId","text"} + binary audio + {"type":"tts_done","ttsId"}
+ *                     {"type":"error","message"}
+ *
+ * Every async operation has a single lifecycle owner; all accept AbortSignal
+ * where applicable; ASR audio flows through a bounded queue (no unbounded
+ * Buffer.concat); TTS is a single serial worker (at most one output stream).
  */
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
+import { randomUUID } from 'node:crypto'
 import WebSocket, { WebSocketServer } from 'ws'
-import { asrStream, ttsStream } from './volcengine.ts'
+import { ttsStream } from './volcengine.ts'
 import { isTrustedVoiceRequest, rejectWebSocketUpgrade } from './voice-trust.ts'
+import { AsrUtterance } from './asr-utterance.ts'
 
 const SENT_RE = /^([^。！？!?.\n]+[。！？!?.\n]+)([\s\S]*)$/
 
-/** 单段 ASR 音频上限（PCM16 16kHz mono：32000 B/s）。超过则强制断句，防 VAD 永不 end。 */
-const MAX_ASR_BYTES = 12 * 32000
 /** 单帧二进制（mic PCM）上限，防异常大帧耗尽内存。 */
 const MAX_FRAME_BYTES = 1024 * 1024
 /** tts_push 单条文本上限（字符）。 */
@@ -29,6 +36,8 @@ const MAX_TEXT_LEN = 10000
 const MAX_CONNECTIONS = 8
 /** 单连接最长存活时长（ms），到时强制断开。 */
 const MAX_SESSION_MS = 60 * 60 * 1000
+/** 能量提示阈值（仅用于“检测到声音才启动识别”，不决定句界）。 */
+const VOICE_RMS_THRESHOLD = 300
 
 function popSentence(text: string): [string | null, string] {
   const m = text.trimStart().match(SENT_RE)
@@ -36,60 +45,29 @@ function popSentence(text: string): [string | null, string] {
   return [null, text]
 }
 
-/** Trim leading/trailing near-silence from PCM16 (single-sample abs threshold). */
-function trimSilence(pcm: Buffer, threshold = 300): Buffer {
+/** 简单 RMS 能量提示：检测到人声能量才启动新一轮识别。 */
+function hasVoiceEnergy(pcm: Buffer, threshold = VOICE_RMS_THRESHOLD): boolean {
   const n = Math.floor(pcm.length / 2)
-  let start = 0
-  let end = n
-  while (start < end && Math.abs(pcm.readInt16LE(start * 2)) < threshold) start += 1
-  while (end > start && Math.abs(pcm.readInt16LE((end - 1) * 2)) < threshold) end -= 1
-  return pcm.subarray(start * 2, end * 2)
-}
-
-/** RMS-energy endpoint detection (mirrors Python EnergyVAD). */
-class EnergyVAD {
-  private lastVoice = 0
-  private started = false
-  constructor(
-    private readonly threshold = 300,
-    private readonly maxSilence = 1.0,
-  ) {}
-
-  feed(pcm: Buffer, now = Date.now() / 1000): string {
-    const n = Math.floor(pcm.length / 2)
-    let sum = 0
-    for (let i = 0; i < n; i++) {
-      const s = pcm.readInt16LE(i * 2)
-      sum += s * s
-    }
-    const rms = n > 0 ? Math.sqrt(sum / n) : 0
-    if (rms > this.threshold) {
-      this.lastVoice = now
-      if (!this.started) {
-        this.started = true
-        return 'start'
-      }
-      return 'continue'
-    }
-    if (this.started && now - this.lastVoice > this.maxSilence) {
-      this.started = false
-      return 'end'
-    }
-    return 'silence'
+  if (n === 0) return false
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    const s = pcm.readInt16LE(i * 2)
+    sum += s * s
   }
+  return Math.sqrt(sum / n) > threshold
 }
 
 class VoiceSession {
-  private asrBuf = Buffer.alloc(0)
+  readonly voiceSessionId = randomUUID()
   private ttsBuf = ''
-  private vad = new EnergyVAD()
   private apiKey: string
   private voice: string
   /** 朗读期硬门控：true 时丢弃麦克风帧，避免外放朗读声被录进去当新指令。 */
   private ttsActive = false
-  /** 识别串行化：一次只跑一段 ASR，防并发导致结果乱序。 */
-  private asrBusy = false
-  private asrQueued = false
+  private currentUt: AsrUtterance | null = null
+  private utSeq = 0
+  private ttsSeq = 0
+  private msgSeq = 0
 
   constructor(
     private readonly ws: WebSocket,
@@ -106,91 +84,88 @@ class VoiceSession {
   }
 
   feedAudio(pcm: Buffer): void {
-    if (this.ttsActive) return // 朗读期硬门控：丢弃外放回声
-    this.asrBuf = Buffer.concat([this.asrBuf, pcm])
-    if (this.asrBuf.length >= MAX_ASR_BYTES) {
-      this.scheduleAsr() // maxDuration 强制断句
-      return
+    if (this.ttsActive) return // 朗读期硬门控
+    if (this.currentUt === null) {
+      if (!hasVoiceEnergy(pcm)) return // 静音不启动，能量仅作提示
+      this.startUtterance()
     }
-    const evt = this.vad.feed(pcm)
-    if (evt === 'end') this.scheduleAsr()
+    this.currentUt?.push(pcm)
   }
 
-  /** 串行化入口：busy 时排队，保证识别结果按说话顺序返回。 */
-  private scheduleAsr(): void {
-    if (this.asrBusy) {
-      this.asrQueued = true
-      return
-    }
-    void this.finalizeAsr()
+  private startUtterance(): void {
+    const id = String(++this.utSeq)
+    const session = this.voiceSessionId
+    const ut = new AsrUtterance(
+      this.apiKey,
+      id,
+      text => this.send({ type: 'asr_final', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq }),
+      text => this.send({ type: 'asr_partial', voiceSessionId: session, utteranceId: id, text, sequence: ++this.msgSeq }),
+      (err) => {
+        if (this.currentUt === ut) this.currentUt = null
+        this.send({ type: 'error', voiceSessionId: session, message: `asr: ${err.message}`, sequence: ++this.msgSeq })
+      },
+    )
+    this.currentUt = ut
+    ut.start()
   }
 
-  async finalizeAsr(): Promise<void> {
-    this.asrBusy = true
-    try {
-      if (!this.asrBuf.length) return
-      const raw = this.asrBuf
-      this.asrBuf = Buffer.alloc(0)
-      const pcm = trimSilence(raw)
-      // eslint-disable-next-line no-console
-      console.error(`[voice] asr input: raw=${raw.length}B trimmed=${pcm.length}B (~${(pcm.length / 32000).toFixed(2)}s)`)
-      if (pcm.length < 3200) return
-      try {
-        await asrStream(pcm, this.apiKey, (r) => {
-          if (r.is_final && r.text.trim()) {
-            // eslint-disable-next-line no-console
-            console.error('[voice] asr final:', r.text)
-            this.send({ type: 'asr_final', text: r.text.trim() })
-          }
-        })
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error('[voice] asr error:', (e as Error).message)
-        this.send({ type: 'error', message: `asr: ${(e as Error).message}` })
-      }
-    } finally {
-      this.asrBusy = false
-      // 排队中的音频或识别期间新到的音频，继续按顺序处理。
-      if (this.asrQueued || this.asrBuf.length > 0) {
-        this.asrQueued = false
-        void this.finalizeAsr()
-      }
-    }
+  /** 正常停止：发送音频结束并等待最终结果（exactly-once）。 */
+  asrEnd(): void {
+    this.currentUt?.end()
+    this.currentUt = null
   }
+
+  /** 取消：直接丢弃，不提交结果。 */
+  asrCancel(): void {
+    this.currentUt?.cancel()
+    this.currentUt = null
+  }
+
+  /** 单一串行 TTS worker：所有合成请求排队执行，天然保证顺序与并发=1。 */
+  private ttsChain: Promise<void> = Promise.resolve()
 
   pushTts(text: string, voice?: string): void {
     this.ttsBuf += text
-    void this.drainTts(voice)
+    void this.enqueueTts(async () => {
+      for (;;) {
+        const [sentence, rest] = popSentence(this.ttsBuf)
+        if (sentence === null) break
+        this.ttsBuf = rest
+        await this.speak(sentence, voice || this.voice)
+      }
+    })
   }
 
-  private async drainTts(voice?: string): Promise<void> {
-    const v = voice || this.voice
-    for (;;) {
-      const [sentence, rest] = popSentence(this.ttsBuf)
-      if (sentence === null) break
-      this.ttsBuf = rest
-      await this.speak(sentence, v)
-    }
+  flushTts(voice?: string): Promise<void> {
+    // 读残留也必须排在串行链尾：等前面所有 push 的句子合成完，
+    // 再把没被切句的尾巴当一句收尾（否则会与前一个 worker 抢 ttsBuf）。
+    return this.enqueueTts(async () => {
+      const tail = this.ttsBuf.trim()
+      this.ttsBuf = ''
+      if (tail) await this.speak(tail, voice || this.voice)
+    })
   }
 
-  async flushTts(voice?: string): Promise<void> {
-    const tail = this.ttsBuf.trim()
-    this.ttsBuf = ''
-    if (tail) await this.speak(tail, voice || this.voice)
+  /** 把一次合成任务挂到串行链尾（前一个失败不阻断后一个）。 */
+  private enqueueTts(job: () => Promise<void>): Promise<void> {
+    const next = this.ttsChain.then(job, job)
+    this.ttsChain = next
+    return next
   }
 
   private async speak(text: string, voice: string): Promise<void> {
+    const ttsId = String(++this.ttsSeq)
     this.ttsActive = true
     try {
-      this.send({ type: 'tts_start', text })
+      this.send({ type: 'tts_start', ttsId, text, sequence: ++this.msgSeq })
       try {
         await ttsStream(text, voice, this.apiKey, (chunk) => {
           if (this.ws.readyState === WebSocket.OPEN) this.ws.send(chunk)
         })
       } catch (e) {
-        this.send({ type: 'error', message: `tts: ${(e as Error).message}` })
+        this.send({ type: 'tts_error', ttsId, message: `tts: ${(e as Error).message}`, sequence: ++this.msgSeq })
       }
-      this.send({ type: 'tts_done' })
+      this.send({ type: 'tts_done', ttsId, sequence: ++this.msgSeq })
     } finally {
       this.ttsActive = false
     }
@@ -221,6 +196,7 @@ export function createVoiceUpgrade(
     const session = new VoiceSession(ws, defaultApiKey, defaultVoice)
     ws.send(JSON.stringify({
       type: 'ready',
+      voiceSessionId: session.voiceSessionId,
       asr: 'volcano',
       tts: 'volcano',
       voice: defaultVoice,
@@ -244,16 +220,22 @@ export function createVoiceUpgrade(
       if (buf.length > 64 * 1024) return // 控制帧超大拒绝
       try {
         const msg = JSON.parse(buf.toString('utf8')) as Record<string, unknown>
+        // 迟到/乱序消息拒绝：带 voiceSessionId 的控制消息必须属于本会话。
+        // （不带 id 的消息向后兼容放行；config 在 ready 前发出，不校验。）
+        const isMySession = (m: Record<string, unknown>): boolean =>
+          typeof m.voiceSessionId !== 'string' || m.voiceSessionId === session.voiceSessionId
         switch (msg.type) {
-          case 'config': session.applyConfig(msg); break
+          case 'config': if (isMySession(msg)) session.applyConfig(msg); break
+          case 'asr_end': if (isMySession(msg)) session.asrEnd(); break
+          case 'asr_cancel': if (isMySession(msg)) session.asrCancel(); break
           case 'tts_push': {
+            if (!isMySession(msg)) break
             const text = String(msg.text ?? '')
             if (text.length > MAX_TEXT_LEN) return
             session.pushTts(text, msg.voice as string | undefined)
             break
           }
-          case 'tts_flush': void session.flushTts(msg.voice as string | undefined); break
-          case 'asr_end': void session.finalizeAsr(); break
+          case 'tts_flush': if (isMySession(msg)) void session.flushTts(msg.voice as string | undefined); break
           default: break
         }
       } catch {

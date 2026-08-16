@@ -1,0 +1,364 @@
+/**
+ * 语音控制器：每个会话独享、React 外部的状态机与资源所有权编排。
+ *
+ * 状态机：idle → acquiring → connecting → listening → recognizing →
+ *         thinking → synthesizing → playing
+ *         + interrupting / reconnecting / closing / failed
+ *
+ * 资源所有权：
+ * - AudioCapture  唯一持有 MediaStream / AudioContext / AudioWorklet。
+ * - VoiceTransport 唯一持有 WebSocket、协议序号与（阶段3）重连。
+ * - PlaybackQueue 唯一持有音频播放与取消。
+ * - VoiceController 持有 AbortController 与启动代次，拒绝迟到消息/旧代次。
+ */
+
+export type VoiceState =
+  | 'idle'
+  | 'acquiring'
+  | 'connecting'
+  | 'listening'
+  | 'recognizing'
+  | 'thinking'
+  | 'synthesizing'
+  | 'playing'
+  | 'interrupting'
+  | 'reconnecting'
+  | 'closing'
+  | 'failed'
+
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${window.location.host}/voice`
+
+/** AudioWorklet 采集器：每累计 2048 帧（@16k ≈ 128ms）把 Float32 帧发回主线程。 */
+const PCM_WORKLET = `
+class PCMProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buf = new Float32Array(0);
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input.length > 0 && input[0]) {
+      const chunk = input[0];
+      const merged = new Float32Array(this.buf.length + chunk.length);
+      merged.set(this.buf, 0);
+      merged.set(chunk, this.buf.length);
+      if (merged.length >= 2048) {
+        this.port.postMessage(merged.slice(0, 2048));
+        this.buf = merged.slice(2048);
+      } else {
+        this.buf = merged;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-processor', PCMProcessor);
+`
+
+/** 唯一拥有 MediaStream / AudioContext / AudioWorklet。 */
+class AudioCapture {
+  private stream: MediaStream | null = null
+  private ctx: AudioContext | null = null
+  private node: AudioWorkletNode | null = null
+
+  constructor(private readonly onAudio: (i16: Int16Array<ArrayBuffer>) => void) {}
+
+  async start(): Promise<void> {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+    })
+    const ctx = new AudioContext({ sampleRate: 16000 })
+    const src = ctx.createMediaStreamSource(stream)
+    const mute = ctx.createGain()
+    mute.gain.value = 0
+    mute.connect(ctx.destination)
+    const blobUrl = URL.createObjectURL(new Blob([PCM_WORKLET], { type: 'application/javascript' }))
+    await ctx.audioWorklet.addModule(blobUrl)
+    URL.revokeObjectURL(blobUrl)
+    const node = new AudioWorkletNode(ctx, 'pcm-processor')
+    node.port.onmessage = (ev) => {
+      this.onAudio(toInt16(ev.data as Float32Array))
+    }
+    src.connect(node)
+    node.connect(mute)
+    this.stream = stream
+    this.ctx = ctx
+    this.node = node
+  }
+
+  stop(): void {
+    try { this.node?.port.close() } catch { /* already closed */ }
+    this.node?.disconnect()
+    this.node = null
+    this.stream?.getTracks().forEach(t => t.stop())
+    this.stream = null
+    void this.ctx?.close().catch(() => {})
+    this.ctx = null
+  }
+}
+
+function toInt16(f32: Float32Array): Int16Array<ArrayBuffer> {
+  const out = new Int16Array(f32.length)
+  for (let i = 0; i < f32.length; i++) {
+    out[i] = Math.max(-1, Math.min(1, f32[i] ?? 0)) * 0x7fff | 0
+  }
+  return out
+}
+
+/** 唯一拥有音频播放与取消；按 ttsId 成组，收到完整结束事件才播放。 */
+class PlaybackQueue {
+  private pending = new Map<string, Uint8Array[]>()
+  private current: HTMLAudioElement | null = null
+  private queue: { url: string }[] = []
+
+  /** 累积一个 ttsId 的音频分片。 */
+  pushAudio(ttsId: string, chunk: Uint8Array): void {
+    const list = this.pending.get(ttsId) ?? []
+    list.push(chunk)
+    this.pending.set(ttsId, list)
+  }
+
+  /** 收到该 ttsId 的完整结束事件，封装成 blob 入播放队列。 */
+  complete(ttsId: string): void {
+    const chunks = this.pending.get(ttsId)
+    if (chunks === undefined || chunks.length === 0) return
+    this.pending.delete(ttsId)
+    const blob = new Blob(chunks as BlobPart[], { type: 'audio/mpeg' })
+    this.queue.push({ url: URL.createObjectURL(blob) })
+    this.pump()
+  }
+
+  private pump(): void {
+    if (this.current !== null || this.queue.length === 0) return
+    const item = this.queue.shift()
+    if (item === undefined) return
+    const audio = new Audio(item.url)
+    this.current = audio
+    audio.onended = () => { URL.revokeObjectURL(item.url); this.current = null; this.pump() }
+    audio.onerror = () => { URL.revokeObjectURL(item.url); this.current = null; this.pump() }
+    void audio.play()
+  }
+
+  /** 立即停止播放并清空（打断）。 */
+  stop(): void {
+    if (this.current !== null) {
+      this.current.pause()
+      this.current.onended = null
+      this.current.onerror = null
+      this.current = null
+    }
+    for (const item of this.queue) URL.revokeObjectURL(item.url)
+    this.queue = []
+    for (const chunks of this.pending.values()) chunks.length = 0
+    this.pending.clear()
+  }
+
+  get isPlaying(): boolean {
+    return this.current !== null || this.queue.length > 0
+  }
+}
+
+export interface VoiceCallbacks {
+  onState: (s: VoiceState) => void
+  onFinal: (text: string) => void
+  onPartial: (text: string) => void
+  onError: (message: string) => void
+}
+
+/** 统一控制器：状态机 + 资源编排 + 代次防串扰。 */
+export class VoiceController {
+  private state: VoiceState = 'idle'
+  private generation = 0
+  private active = false
+  private ws: WebSocket | null = null
+  private capture: AudioCapture | null = null
+  private readonly playback = new PlaybackQueue()
+  private voiceSessionId = ''
+  private capturing = false
+  private currentTtsId = ''
+  /** stop 后等待 asr_final 的超时兜底（正常路径收到 final 立即关闭）。 */
+  private stopTimer: ReturnType<typeof setTimeout> | null = null
+  private readyResolve: ((ok: boolean) => void) | null = null
+  /** stop 后等待最终结果的超时上限。 */
+  private static readonly STOP_TIMEOUT_MS = 3000
+
+  constructor(private readonly callbacks: VoiceCallbacks) {}
+
+  get currentState(): VoiceState {
+    return this.state
+  }
+
+  get isActive(): boolean {
+    return this.active
+  }
+
+  private setState(s: VoiceState): void {
+    if (this.state !== s) {
+      this.state = s
+      this.callbacks.onState(s)
+    }
+  }
+
+  /** 开始语音会话（acquiring → connecting → listening）。 */
+  async start(): Promise<void> {
+    if (this.active) return // 防重复 start（ABA 竞态防护由代次处理）
+    const gen = ++this.generation
+    this.active = true
+
+    this.setState('acquiring')
+    try {
+      const capture = new AudioCapture((i16) => {
+        if (gen !== this.generation || !this.capturing) return // 旧代次/非采集态丢弃
+        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(i16)
+      })
+      await capture.start()
+      if (gen !== this.generation) { capture.stop(); return }
+      this.capture = capture
+      this.setState('connecting')
+      const ok = await this.connect(gen)
+      // stop/cancel 已发生（active=false）时静默退出，不报错
+      if (!ok) {
+        if (this.active) this.fail('无法连接语音服务（后端未启动）')
+        return
+      }
+      this.setState('listening')
+      this.capturing = true
+    } catch (e) {
+      if (gen === this.generation) this.fail((e as Error).message)
+    }
+  }
+
+  private connect(gen: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const ws = new WebSocket(WS_URL)
+      ws.binaryType = 'arraybuffer'
+      const timer = setTimeout(() => { ws.close(); resolve(false) }, 3000)
+      ws.onopen = () => {
+        clearTimeout(timer)
+        if (gen !== this.generation) { ws.close(); return } // 已 stop/cancel
+        ws.send(JSON.stringify({ type: 'config', provider: 'volcengine', voice: localStorage.getItem('dsh-voice') ?? 'zh_female_vv_uranus_bigtts' }))
+      }
+      ws.onmessage = e => this.onMessage(gen, e)
+      ws.onclose = () => {
+        clearTimeout(timer)
+        // 连接未完成即关闭：必须 resolve，否则 start 挂起
+        this.readyResolve?.(false)
+        this.readyResolve = null
+        if (gen === this.generation) {
+          this.capturing = false
+          if (this.active) this.fail('语音连接已断开')
+        }
+      }
+      ws.onerror = () => { clearTimeout(timer); resolve(false) }
+      // ready 到来即视为连接成功
+      this.ws = ws
+      this.readyResolve = resolve
+    })
+  }
+
+  private onMessage(gen: number, e: MessageEvent): void {
+    if (gen !== this.generation) return // 旧代次消息拒绝
+    if (typeof e.data === 'string') {
+      const msg = JSON.parse(e.data) as Record<string, unknown>
+      if (msg.type === 'ready') {
+        this.voiceSessionId = String(msg.voiceSessionId ?? '')
+        if (msg.hasKey === false) {
+          this.readyResolve?.(false)
+          this.readyResolve = null
+          this.fail('后端未配置 VOLCENGINE_API_KEY')
+          return
+        }
+        this.readyResolve?.(true)
+        this.readyResolve = null
+        return
+      }
+      // stop 后：asr_final 仍要提交（stop = 发送结束并等待最终结果）
+      if (msg.type === 'asr_final' && typeof msg.text === 'string') {
+        const text = msg.text
+        if (this.state === 'closing' || this.state === 'failed') {
+          this.clearStopTimer()
+          this.callbacks.onFinal(text)
+          this.teardown()
+          return
+        }
+        this.setState('thinking')
+        this.callbacks.onFinal(text)
+        return
+      }
+      if (this.state === 'closing' || this.state === 'failed') return // 停止后忽略其余消息
+      if (msg.type === 'asr_partial' && typeof msg.text === 'string') {
+        this.callbacks.onPartial(msg.text)
+      } else if (msg.type === 'tts_start') {
+        this.currentTtsId = String(msg.ttsId ?? '')
+        this.setState('synthesizing')
+      } else if (msg.type === 'tts_done') {
+        this.playback.complete(String(msg.ttsId ?? ''))
+        this.setState(this.capturing ? 'listening' : 'playing')
+      } else if (msg.type === 'tts_error') {
+        this.callbacks.onError(String(msg.message ?? 'TTS 失败'))
+      } else if (msg.type === 'error') {
+        this.callbacks.onError(String(msg.message ?? '语音接口错误'))
+      }
+    } else if (e.data instanceof ArrayBuffer) {
+      // 二进制 = TTS 音频分片，按当前 ttsId 累积
+      this.playback.pushAudio(this.currentTtsId, new Uint8Array(e.data))
+    }
+  }
+
+  /** 正常停止：发送音频结束并等待最终结果（stop=await final），然后关闭。 */
+  stop(): void {
+    if (!this.active) return
+    this.active = false
+    this.capturing = false
+    this.capture?.stop()
+    this.capture = null
+    this.setState('closing')
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'asr_end', voiceSessionId: this.voiceSessionId }))
+      // 等待 asr_final；超时兜底（正常路径收到 final 立即 teardown）
+      this.stopTimer = setTimeout(() => this.teardown(), VoiceController.STOP_TIMEOUT_MS)
+    } else {
+      this.teardown()
+    }
+  }
+
+  /** 取消：直接丢弃，立即关闭。 */
+  cancel(): void {
+    if (!this.active) return
+    this.active = false
+    this.capturing = false
+    this.capture?.stop()
+    this.capture = null
+    this.setState('closing')
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'asr_cancel', voiceSessionId: this.voiceSessionId }))
+    }
+    this.teardown() // teardown 内 ++generation，使在途 asr_final 失效（丢弃）
+  }
+
+  private clearStopTimer(): void {
+    if (this.stopTimer !== null) {
+      clearTimeout(this.stopTimer)
+      this.stopTimer = null
+    }
+  }
+
+  private teardown(): void {
+    this.generation++ // 使所有在途消息失效
+    this.clearStopTimer()
+    this.ws?.close()
+    this.ws = null
+    this.playback.stop()
+    this.setState('idle')
+  }
+
+  private fail(message: string): void {
+    this.active = false
+    this.capturing = false
+    this.capture?.stop()
+    this.capture = null
+    this.setState('failed')
+    this.callbacks.onError(message)
+    this.teardown()
+  }
+}

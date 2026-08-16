@@ -2,42 +2,67 @@
  * Composer mic control, registered on `conversation.input.left` (the additive
  * left tool-row seat). Framework-injected `inputActions` writes the transcript
  * into the draft and submits; no private InputBar keyboard face is touched.
+ *
+ * 生命周期交给 VoiceController（React 外部状态机），组件只读状态、转发
+ * start/stop 动作，不再扫描 DOM、不再持有播放队列。
  */
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useRealtimeVoice } from './usePipelineVoice.ts'
+import { VoiceController, type VoiceState } from './VoiceController.ts'
 import css from './VoiceInputButton.module.css'
 
 export type VoiceInputButtonProps =
   PropsRuntime<'conversation.input.left'> & PropsLocale<'voice'>
 
-export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButtonProps) {
-  const voice = useRealtimeVoice({
-    onInterim: (text) => { inputActions.setDraft(text) },
-    onFinal: (text) => {
-      inputActions.setDraft(text)
-      inputActions.submit()
-    },
-  })
+const ACTIVE_STATES: ReadonlySet<VoiceState> = new Set([
+  'acquiring', 'connecting', 'listening', 'recognizing', 'thinking',
+  'synthesizing', 'playing', 'interrupting', 'reconnecting',
+])
 
-  const running = useSession(s => s.running) ?? false
-  useEffect(() => { voice.setRunning(running) }, [running, voice.setRunning])
+export function VoiceInputButton({ inputActions, t }: VoiceInputButtonProps) {
+  const [state, setState] = useState<VoiceState>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const controllerRef = useRef<VoiceController | null>(null)
 
-  const tooltip = voice.error ?? (voice.active ? t('voice.micActive') : t('voice.mic'))
+  const controller = (): VoiceController => {
+    if (controllerRef.current === null) {
+      controllerRef.current = new VoiceController({
+        onState: setState,
+        onPartial: (text) => { inputActions.setDraft(text) },
+        onFinal: (text) => {
+          inputActions.setDraft(text)
+          inputActions.submit()
+        },
+        onError: message => setError(message),
+      })
+    }
+    return controllerRef.current
+  }
+
+  const active = ACTIVE_STATES.has(state)
+  const tooltip = error ?? (active ? t('voice.micActive') : t('voice.mic'))
+
+  useEffect(() => () => {
+    controllerRef.current?.cancel()
+  }, [])
 
   return (
     <Tooltip label={tooltip} side="top" delayMs={500}>
       <button
         type="button"
-        className={clsx(css.mic, voice.active && css.active, voice.error && css.error)}
-        aria-label={voice.error ?? t('voice.mic')}
-        aria-pressed={voice.active}
-        disabled={!voice.supported}
-        onClick={() => { if (voice.active) voice.stop(); else voice.start() }}
+        className={clsx(css.mic, active && css.active, error && css.error)}
+        aria-label={error ?? t('voice.mic')}
+        aria-pressed={active}
+        onClick={() => {
+          setError(null)
+          const c = controller()
+          if (c.isActive) c.stop()
+          else void c.start()
+        }}
       >
-        {voice.active ? (
+        {active ? (
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
             <rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="currentColor" />
           </svg>
