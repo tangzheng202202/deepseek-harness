@@ -72,6 +72,20 @@ describe('VoiceSettingsSection reply-first toggle', () => {
   })
 })
 
+describe('VoiceSettingsSection 唤醒词', () => {
+  it('开启唤醒后显示唤醒词输入并可持久化', () => {
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const checkboxes = view.container.querySelectorAll('input[type="checkbox"]')
+    const wake = checkboxes[1]!
+    fireEvent.click(wake) // 开启唤醒
+    expect(localStorage.getItem('dsh-voice-wake')).toBe('1')
+    const input = view.container.querySelector('input[type="text"]')!
+    expect(input).not.toBeNull()
+    fireEvent.change(input, { target: { value: '小戴小戴' } })
+    expect(localStorage.getItem('dsh-voice-wakeword')).toBe('小戴小戴')
+  })
+})
+
 describe('VoiceSettingsSection AEC probe', () => {
   it('reports whether the browser applied AEC to the mic track', async () => {
     const tracks = [{ getSettings: () => ({ echoCancellation: true }), stop: vi.fn() }]

@@ -72,4 +72,20 @@ describe('ui-voice-live host apply', () => {
       if (previous !== undefined) process.env.VOLCENGINE_API_KEY = previous
     }
   })
+
+  it('空 dshSessionId 不触发 agent 取消（防御分支）', () => {
+    const previous = process.env.VOLCENGINE_API_KEY
+    process.env.VOLCENGINE_API_KEY = 'configured-key'
+    try {
+      const b = context()
+      apply(b.ctx as never)
+      const cancelAgent = h.create.mock.calls[0]?.[2] as (id: string) => void
+      cancelAgent('')
+      expect(b.get).not.toHaveBeenCalled()
+      expect(b.cancel).not.toHaveBeenCalled()
+    } finally {
+      if (previous === undefined) delete process.env.VOLCENGINE_API_KEY
+      else process.env.VOLCENGINE_API_KEY = previous
+    }
+  })
 })

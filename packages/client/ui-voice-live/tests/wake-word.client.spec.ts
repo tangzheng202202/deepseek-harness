@@ -2,7 +2,7 @@
 /** 唤醒词检测器：Web Speech API 实现的行为。 */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { WebSpeechWakeWord } from '../src/client/wake-word.ts'
+import { createWakeWordDetector, WebSpeechWakeWord } from '../src/client/wake-word.ts'
 
 /** 可编程 SpeechRecognition fake（模块级共享，测试可触发其结果）。 */
 let lastRec: FakeRecognition | null = null
@@ -66,5 +66,21 @@ describe('WebSpeechWakeWord', () => {
     const ok = await det.start()
     expect(ok).toBe(false)
     expect(det.active).toBe(false)
+  })
+
+  it('start() 抛错（如权限拒绝）→ 返回 false 且不激活', async () => {
+    class ThrowingRecognition extends FakeRecognition {
+      override start(): void { throw new Error('not allowed') }
+    }
+    const w = window as unknown as Record<string, unknown>
+    w.SpeechRecognition = ThrowingRecognition
+    const det = new WebSpeechWakeWord('你好', vi.fn())
+    const ok = await det.start()
+    expect(ok).toBe(false)
+    expect(det.active).toBe(false)
+  })
+
+  it('createWakeWordDetector 工厂返回 Web Speech 实现', () => {
+    expect(createWakeWordDetector('你好', vi.fn())).toBeInstanceOf(WebSpeechWakeWord)
   })
 })

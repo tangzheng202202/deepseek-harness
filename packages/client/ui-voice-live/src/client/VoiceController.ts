@@ -170,6 +170,7 @@ class PlaybackQueue {
   private pump(): void {
     if (this.current !== null || this.queue.length === 0) return
     const item = this.queue.shift()
+    /* v8 ignore next -- length>0 时 shift 必有值，此守卫仅防未来类型变更 */
     if (item === undefined) return
     const audio = new Audio(item.url)
     this.current = audio

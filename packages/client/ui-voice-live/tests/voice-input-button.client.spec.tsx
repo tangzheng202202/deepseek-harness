@@ -32,10 +32,30 @@ vi.mock('../src/client/VoiceController.ts', () => ({
   },
 }))
 
+/** 唤醒检测器桩：组件挂载时注册，测试可触发 onWake 断言自动开始。 */
+const wakeH = vi.hoisted(() => ({
+  detector: null as null | {
+    start: Mock<() => Promise<boolean>>
+    stop: Mock<() => void>
+    onWake: () => void
+  },
+}))
+vi.mock('../src/client/wake-word.ts', () => ({
+  createWakeWordDetector: (_keyword: string, onWake: () => void) => {
+    const d = { start: vi.fn(async () => true), stop: vi.fn(), onWake }
+    wakeH.detector = d
+    return d
+  },
+}))
+
 import { VoiceInputButton } from '../src/client/VoiceInputButton.tsx'
 
 afterEach(cleanup)
-beforeEach(() => { h.instances = [] })
+beforeEach(() => {
+  h.instances = []
+  wakeH.detector = null
+  localStorage.clear()
+})
 
 const t = (key: string): string => ({
   'voice.mic': '开始语音',
@@ -126,5 +146,44 @@ describe('VoiceInputButton', () => {
     view.rerender(<VoiceInputButton {...props} />)
     expect(controller.flushReply).toHaveBeenCalledTimes(1)
     expect(controller.endReply).toHaveBeenCalledTimes(1)
+  })
+
+  it('开启唤醒时挂载常驻检测器，命中唤醒词自动开始语音会话', async () => {
+    localStorage.setItem('dsh-voice-wake', '1')
+    localStorage.setItem('dsh-voice-wakeword', '你好小戴')
+    const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
+    const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector({ running: false, partial: null }))
+    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    const view = render(<VoiceInputButton {...props} />)
+    expect(wakeH.detector).not.toBeNull()
+    expect(wakeH.detector?.start).toHaveBeenCalledOnce()
+
+    // 识别到唤醒词 → 自动进入语音会话
+    await act(async () => { wakeH.detector!.onWake() })
+    expect(h.instances.length).toBe(1)
+    expect(h.instances[0]!.start).toHaveBeenCalledOnce()
+
+    // 卸载 → 检测器停止；停止后迟到的唤醒不再开始新会话（stopped 守卫）
+    view.unmount()
+    expect(wakeH.detector?.stop).toHaveBeenCalledOnce()
+    await act(async () => { wakeH.detector!.onWake() })
+    expect(h.instances.length).toBe(1) // 不再创建新 controller
+  })
+
+  it('非语音回合的 running 状态不推送回复文本', async () => {
+    const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
+    let snapshot: Record<string, unknown> = { running: false, partial: null }
+    const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
+    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    const view = render(<VoiceInputButton {...props} />)
+    fireEvent.click(view.container.querySelector('button')!) // 创建 controller
+    const controller = h.instances[0]!
+
+    // running=true 但 voiceTurn 未置位（非语音发起回合）→ 不朗读
+    snapshot = { running: true, partial: { blocks: [{ kind: 'text', text: '不该朗读' }] } }
+    view.rerender(<VoiceInputButton {...props} />)
+    expect(controller.pushReplyText).not.toHaveBeenCalled()
+    expect(controller.flushReply).not.toHaveBeenCalled()
+    expect(controller.endReply).not.toHaveBeenCalled()
   })
 })

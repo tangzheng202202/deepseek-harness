@@ -61,9 +61,10 @@ export class WebSpeechWakeWord implements WakeWordDetector {
     return this._active
   }
 
-  async start(): Promise<boolean> {
+  /** 同步配置 + 启动；接口要求返回 Promise<boolean>，显式包装避免 async 空转。 */
+  start(): Promise<boolean> {
     const Ctor = speechRecognitionCtor()
-    if (Ctor === null) return false
+    if (Ctor === null) return Promise.resolve(false)
     const rec = new Ctor()
     rec.continuous = true
     rec.interimResults = false
@@ -80,10 +81,10 @@ export class WebSpeechWakeWord implements WakeWordDetector {
     try {
       rec.start()
       this._active = true
-      return true
+      return Promise.resolve(true)
     } catch {
       this.recognition = null
-      return false
+      return Promise.resolve(false)
     }
   }
 

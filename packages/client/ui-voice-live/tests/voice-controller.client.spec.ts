@@ -103,6 +103,16 @@ class FakeAudio {
   __fail(): void { this.onerror?.() }
 }
 
+/** 播放被浏览器阻止的 Audio（autoplay 拒绝路径）。 */
+class RejectingAudio extends FakeAudio {
+  override async play(): Promise<void> { throw new Error('blocked') }
+}
+
+/** 构造即失败的 WebSocket（重连/试听的构造器异常路径）。 */
+function throwingWS(_url: string): never {
+  throw new Error('blocked')
+}
+
 let gumImpl: (constraints?: MediaStreamConstraints) => Promise<FakeStream> =
   () => Promise.resolve(new FakeStream())
 /** getUserMedia 的 mock（供断言约束，避免 unbound-method）。 */
@@ -723,5 +733,473 @@ describe('试听 previewVoice', () => {
     const r = await p
     expect(r.ok).toBe(false)
     expect(r.message).toContain('超时')
+    ws.__error() // 超时完成后迟到的 error → finish 幂等（settled 守卫）
+    expect(r.ok).toBe(false)
+  })
+})
+
+describe('采集与连接失败路径', () => {
+  it('worklet 加载失败 → failed 并回调 onError', async () => {
+    const { c, cb } = makeController()
+    vi.stubGlobal('AudioContext', class extends FakeAudioContext {
+      constructor() {
+        super()
+        this.audioWorklet = { addModule: async (): Promise<void> => { throw new Error('worklet failed') } }
+      }
+    })
+    const started = c.start()
+    await flush()
+    await started
+    expect(cb.onError).toHaveBeenCalledWith('worklet failed')
+    expect(cb.onState.mock.calls.some(call => call[0] === 'failed')).toBe(true)
+    expect(FakeWS.instances.length).toBe(0)
+    expect(FakeAudioContext.alive.length).toBe(0)
+    expect(allTracks().every(t => t.stopped)).toBe(true)
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+  })
+
+  it('麦克风被拒绝 → failed 并回调 onError', async () => {
+    const { c, cb } = makeController()
+    gumImpl = () => Promise.reject(new Error('mic denied'))
+    const started = c.start()
+    await flush()
+    await started
+    expect(cb.onError).toHaveBeenCalledWith('mic denied')
+    expect(FakeWS.instances.length).toBe(0)
+  })
+
+  it('连接失败（ws error）→ failed 并回调 onError', async () => {
+    const { c, cb } = makeController()
+    const started = c.start()
+    await flush()
+    lastWS().__error()
+    await started
+    expect(cb.onError).toHaveBeenCalledWith('无法连接语音服务（后端未启动）')
+    expect(cb.onState.mock.calls.some(call => call[0] === 'failed')).toBe(true)
+    expect(FakeWS.alive.length).toBe(0)
+    expect(FakeAudioContext.alive.length).toBe(0)
+  })
+
+  it('connecting 中 stop 后迟到的 open 不再发送 config（代次失效）', async () => {
+    const { c } = makeController()
+    const started = c.start()
+    await flush()
+    const ws = lastWS()
+    c.stop() // teardown → generation++
+    ws.__open() // 迟到的 open：代次不匹配 → 关闭，不发 config
+    await started // 不应挂起
+    expect(ws.readyState).toBe(FakeWS.CLOSED)
+    expect(ws.sent.some(s => typeof s === 'string' && s.includes('"config"'))).toBe(false)
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('后端未配置 key（ready hasKey=false）→ failed', async () => {
+    const { c, cb } = makeController()
+    const p = c.start()
+    await flush()
+    lastWS().__open()
+    lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: false }))
+    await p
+    expect(cb.onError).toHaveBeenCalledWith('后端未配置 VOLCENGINE_API_KEY')
+    expect(FakeWS.alive.length).toBe(0)
+  })
+})
+
+describe('消息处理防御分支', () => {
+  it('畸形 / 非对象控制消息被忽略', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    ws.__msg('not-json{{{')
+    ws.__msg(JSON.stringify('hello'))
+    ws.__msg(JSON.stringify(42))
+    expect(cb.onError).not.toHaveBeenCalled()
+    expect(cb.onPartial).not.toHaveBeenCalled()
+    expect(cb.onFinal).not.toHaveBeenCalled()
+    expect(FakeWS.alive.length).toBe(1)
+    c.cancel()
+  })
+
+  it('tts_error 匹配当前 ttsId 时清空其记录', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: 'x' }))
+    ws.__msg(JSON.stringify({ type: 'tts_error', ttsId: '1', message: 'boom' }))
+    expect(cb.onError).toHaveBeenCalledWith('boom')
+    ws.__msg(new ArrayBuffer(8)) // currentTtsId 已清空 → 不进播放
+    expect(FakeAudio.instances.length).toBe(0)
+    c.cancel()
+  })
+
+  it('通用 error 消息回调 onError；缺 message 用默认文案', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    ws.__msg(JSON.stringify({ type: 'error', message: '接口挂了' }))
+    expect(cb.onError).toHaveBeenLastCalledWith('接口挂了')
+    ws.__msg(JSON.stringify({ type: 'error' }))
+    expect(cb.onError).toHaveBeenLastCalledWith('语音接口错误')
+    c.cancel()
+  })
+})
+
+describe('状态机幂等与空闲路径', () => {
+  it('空闲态 stop / cancel / endReply 均为无操作', async () => {
+    const { c, cb } = makeController()
+    c.stop()
+    c.cancel()
+    c.endReply()
+    expect(FakeWS.instances.length).toBe(0)
+    expect(cb.onFinal).not.toHaveBeenCalled()
+    expect(c.currentState).toBe('idle')
+  })
+
+  it('isActive 反映会话进行状态', async () => {
+    const { c } = makeController()
+    expect(c.isActive).toBe(false)
+    const p = c.start()
+    await flush()
+    expect(c.isActive).toBe(true)
+    lastWS().__open()
+    lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    await p
+    expect(c.isActive).toBe(true)
+    c.cancel()
+    expect(c.isActive).toBe(false)
+  })
+
+  it('active 中再次 start 直接返回（防重复启动）', async () => {
+    const { c } = makeController()
+    const p1 = c.start()
+    const p2 = c.start() // active 已同步置位 → 立即返回
+    await p2
+    await flush()
+    expect(FakeWS.instances.length).toBe(1) // 只有一轮资源
+    const ws = lastWS()
+    ws.__open()
+    ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    await p1
+    expect(c.currentState).toBe('listening')
+    c.cancel()
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('连续两个不同 utterance 的 final：第二次进入应答模式幂等', async () => {
+    const { c, cb } = makeController()
+    const ws = await startReady(c)
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', utteranceId: 'u1', text: '一' }))
+    expect(cb.onFinal).toHaveBeenCalledTimes(1)
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', utteranceId: 'u2', text: '二' }))
+    expect(cb.onFinal).toHaveBeenCalledTimes(2)
+    expect(FakeWS.alive.length).toBe(1)
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 's' }))
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('连续 pushReplyText 重置应答空闲计时器', async () => {
+    vi.useFakeTimers()
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', text: 'x' }))
+    c.pushReplyText('a')
+    c.pushReplyText('b')
+    c.pushReplyText('c')
+    expect(ws.sent.filter(s => typeof s === 'string' && s.includes('tts_push')).length).toBe(3)
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 's' }))
+    expect(FakeWS.alive.length).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('应答空闲超时（REPLY_TIMEOUT_MS）强制关闭连接', async () => {
+    vi.useFakeTimers()
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', text: 'x' }))
+    expect(FakeWS.alive.length).toBe(1) // 应答模式：连接保持
+    await vi.advanceTimersByTimeAsync(120_000 + 100) // 空闲兜底到期
+    expect(FakeWS.alive.length).toBe(0) // teardown 关闭连接
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('播放资源回收', () => {
+  it('tts_done 无音频分片 → 不创建播放对象', async () => {
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', text: 'x' }))
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '9', text: 'a' }))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '9' })) // 无分片 → complete 提前返回
+    expect(FakeAudio.instances.length).toBe(0)
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 's' }))
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('打断时清空排队与未完成音频资源', async () => {
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', text: 'x' }))
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: 'a' }))
+    ws.__msg(new ArrayBuffer(8))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' })) // 正在播放
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '2', text: 'b' }))
+    ws.__msg(new ArrayBuffer(8))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '2' })) // 排队未播
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '3', text: 'c' }))
+    ws.__msg(new ArrayBuffer(8)) // 挂起未完成
+    expect(FakeAudio.instances.length).toBe(1)
+    c.cancel() // 打断：停止播放 + 清空排队与挂起
+    expect(FakeAudio.instances[0]?.playing).toBe(false)
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('播放完成事件与 play 拒绝竞争：完成路径只执行一次', async () => {
+    vi.stubGlobal('Audio', RejectingAudio)
+    try {
+      const { c } = makeController()
+      const ws = await startReady(c)
+      c.stop()
+      ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', text: 'x' }))
+      ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: 'a' }))
+      ws.__msg(new ArrayBuffer(8))
+      ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+      const a = FakeAudio.instances[0]
+      expect(a).toBeDefined()
+      a?.__end() // onended 先执行 → finish
+      await flush() // play 的 catch 随后执行 → finish 幂等返回
+      expect(FakeAudio.instances.length).toBe(1)
+      c.endReply()
+      ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 's' }))
+      expect(FakeWS.alive.length).toBe(0)
+    } finally {
+      vi.stubGlobal('Audio', FakeAudio)
+    }
+  })
+
+  it('stop 后到达的采集帧被丢弃（capturing 门控）', async () => {
+    const { c } = makeController()
+    const ws = await startReady(c)
+    emitMicFrame() // listening：帧照常发送
+    expect(ws.sent.at(-1)).toBeInstanceOf(Int16Array)
+    c.stop()
+    const sentCount = ws.sent.length
+    emitMicFrame() // 已 stop：capturing=false → 丢弃
+    expect(ws.sent.length).toBe(sentCount)
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 's', text: 'x' }))
+    c.flushReply()
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 's' }))
+    expect(FakeWS.alive.length).toBe(0)
+  })
+})
+
+describe('重连器清理与构造失败', () => {
+  it('重连退避中 cancel → 重连计时器被清理', async () => {
+    vi.useFakeTimers()
+    const { c } = makeController()
+    const ws1 = await startReady(c)
+    ws1.close() // 触发退避
+    expect(c.currentState).toBe('reconnecting')
+    c.cancel() // teardown → clearReconnect
+    expect(FakeWS.instances.length).toBe(1)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(FakeWS.instances.length).toBe(1) // 无新连接
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('重连期间 WebSocket 构造抛错 → 继续退避，达上限后 failed', async () => {
+    vi.useFakeTimers()
+    const { c, cb } = makeController()
+    const ws1 = await startReady(c)
+    ws1.close()
+    vi.stubGlobal('WebSocket', throwingWS)
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(16_000) // 退避 + 立即抛错
+    }
+    vi.stubGlobal('WebSocket', FakeWS)
+    expect(cb.onError).toHaveBeenCalled()
+    expect(cb.onState.mock.calls.some(call => call[0] === 'failed')).toBe(true)
+    expect(c.currentState).toBe('idle')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('previewVoice 错误路径', () => {
+  it('WebSocket 构造失败 → 返回明确错误', async () => {
+    vi.stubGlobal('WebSocket', throwingWS)
+    try {
+      const r = await previewVoice('v')
+      expect(r.ok).toBe(false)
+      expect(r.message).toContain('blocked')
+    } finally {
+      vi.stubGlobal('WebSocket', FakeWS)
+    }
+  })
+
+  it('onerror / onclose（未完成）→ 返回连接错误', async () => {
+    const p1 = previewVoice('v')
+    lastWS().__error()
+    const r1 = await p1
+    expect(r1.ok).toBe(false)
+    expect(r1.message).toContain('无法连接语音服务')
+
+    const p2 = previewVoice('v')
+    lastWS().close()
+    const r2 = await p2
+    expect(r2.ok).toBe(false)
+    expect(r2.message).toContain('语音连接已断开')
+  })
+
+  it('畸形 / 非对象消息被忽略，正常路径仍可完成', async () => {
+    const p = previewVoice('v')
+    const ws = lastWS()
+    ws.__open()
+    await flush()
+    ws.__msg('not-json{{{')
+    ws.__msg(JSON.stringify('x'))
+    ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1' }))
+    ws.__msg(new ArrayBuffer(8))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+    expect(FakeAudio.instances.length).toBe(1)
+    FakeAudio.instances[0]?.__end()
+    const r = await p
+    expect(r.ok).toBe(true)
+  })
+
+  it('tts_done 无音频分片 → 明确失败', async () => {
+    const p = previewVoice('v')
+    const ws = lastWS()
+    ws.__open()
+    await flush()
+    ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1' }))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' })) // 无分片
+    const r = await p
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('未收到合成音频')
+  })
+
+  it('tts_error 消息 → 完成并返回其文案', async () => {
+    const p = previewVoice('v')
+    const ws = lastWS()
+    ws.__open()
+    await flush()
+    ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    ws.__msg(JSON.stringify({ type: 'tts_error', message: '合成接口挂了' }))
+    const r = await p
+    expect(r.ok).toBe(false)
+    expect(r.message).toBe('合成接口挂了')
+  })
+
+  it('音频播放失败（error 事件）→ 明确失败', async () => {
+    const p = previewVoice('v')
+    const ws = lastWS()
+    ws.__open()
+    await flush()
+    ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1' }))
+    ws.__msg(new ArrayBuffer(8))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+    const a = FakeAudio.instances[0]
+    expect(a).toBeDefined()
+    a?.__fail()
+    const r = await p
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('播放失败')
+  })
+
+  it('自动播放被浏览器阻止 → 明确失败', async () => {
+    vi.stubGlobal('Audio', RejectingAudio)
+    try {
+      const p = previewVoice('v')
+      const ws = lastWS()
+      ws.__open()
+      await flush()
+      ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+      ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1' }))
+      ws.__msg(new ArrayBuffer(8))
+      ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+      const r = await p
+      expect(r.ok).toBe(false)
+      expect(r.message).toContain('浏览器阻止了试听播放')
+    } finally {
+      vi.stubGlobal('Audio', FakeAudio)
+    }
+  })
+
+  it('音频失败与播放拒绝竞争：先到者生效、后到者幂等', async () => {
+    vi.stubGlobal('Audio', RejectingAudio)
+    try {
+      const p = previewVoice('v')
+      const ws = lastWS()
+      ws.__open()
+      await flush()
+      ws.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+      ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1' }))
+      ws.__msg(new ArrayBuffer(8))
+      ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+      const a = FakeAudio.instances[0]
+      a?.__fail() // onerror 先执行 → done
+      const r = await p // play 的 catch 随后执行 → done 幂等返回
+      expect(r.ok).toBe(false)
+      expect(r.message).toContain('播放失败')
+    } finally {
+      vi.stubGlobal('Audio', FakeAudio)
+    }
+  })
+})
+
+describe('localStorage 缺失兜底', () => {
+  it('无 localStorage 时 getter 返回默认值、setter 为无操作', async () => {
+    vi.stubGlobal('localStorage', undefined)
+    const up = await import('../src/client/usePipelineVoice.ts')
+    expect(up.getActiveVoice()).toBe(up.DEFAULT_VOICE)
+    expect(up.getReplyFirst()).toBe(true)
+    up.setReplyFirst(false)
+    expect(up.getWakeWordEnabled()).toBe(false)
+    up.setWakeWordEnabled(true)
+    expect(up.getWakeWord()).toBe(up.DEFAULT_WAKE_WORD)
+    up.setWakeWord('x')
+    up.setActiveVoice('v')
+    up.setActiveProvider('volcengine')
+    // 恢复 localStorage stub，避免污染后续测试
+    const store = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => { store.set(k, v) },
+      removeItem: (k: string) => { store.delete(k) },
+    })
+  })
+})
+
+describe('WSS URL（https 源）', () => {
+  it('VoiceController 与 previewVoice 在 https 下使用 wss://', async () => {
+    vi.resetModules()
+    vi.stubGlobal('window', { location: { protocol: 'https:', host: 'voice.example' } })
+    const vc = await import('../src/client/VoiceController.ts')
+    const up = await import('../src/client/usePipelineVoice.ts')
+    const C2 = vc.VoiceController
+    const c = new C2({ onState: vi.fn(), onFinal: vi.fn(), onPartial: vi.fn(), onError: vi.fn() })
+    const started = c.start()
+    await flush()
+    const wsC = lastWS()
+    expect(wsC.url.startsWith('wss://')).toBe(true)
+    const pv = up.previewVoice('v')
+    await flush()
+    const wsP = lastWS()
+    expect(wsP.url.startsWith('wss://')).toBe(true)
+    wsP.__error()
+    await pv
+    wsC.__open()
+    wsC.__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
+    await started
+    expect(c.currentState).toBe('listening')
+    c.cancel()
+    expect(FakeWS.alive.length).toBe(0)
   })
 })

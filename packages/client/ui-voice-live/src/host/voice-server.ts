@@ -59,7 +59,8 @@ function hasVoiceEnergy(pcm: Buffer, threshold = VOICE_RMS_THRESHOLD): boolean {
   return Math.sqrt(sum / n) > threshold
 }
 
-class VoiceSession {
+/** 单个 WebSocket 连接的语音会话（导出供单元测试直接驱动防御分支）。 */
+export class VoiceSession {
   readonly voiceSessionId = randomUUID()
   private ttsBuf = ''
   private apiKey: string
@@ -143,6 +144,7 @@ class VoiceSession {
         this.send({ type: 'error', voiceSessionId: session, message: `asr: ${err.message}`, sequence: ++this.msgSeq })
       },
       () => {
+        /* v8 ignore next -- 所有能令流结束的路径（end/cancel/error/final）都已先行清空 currentUt，此守卫仅防未来改动 */
         if (this.currentUt === ut) this.currentUt = null
       },
     )
@@ -215,6 +217,7 @@ class VoiceSession {
     this.ttsActive = true
     try {
       this.send({ type: 'tts_start', ttsId, text, sequence: ++this.msgSeq })
+      let ok = false
       try {
         await ttsStream(text, voice, this.apiKey, (chunk) => {
           if (!this.disposed && generation === this.ttsGeneration
@@ -222,12 +225,14 @@ class VoiceSession {
             this.ws.send(chunk)
           }
         }, { signal: abort.signal })
+        ok = true
       } catch (e) {
         if (!this.disposed && generation === this.ttsGeneration) {
           this.send({ type: 'tts_error', ttsId, message: `tts: ${(e as Error).message}`, sequence: ++this.msgSeq })
         }
       }
-      if (!this.disposed && generation === this.ttsGeneration) {
+      // 失败的合成不补发 tts_done（客户端按 done 事件才播放）。
+      if (ok && !this.disposed && generation === this.ttsGeneration) {
         this.send({ type: 'tts_done', ttsId, sequence: ++this.msgSeq })
       }
     } finally {
@@ -291,11 +296,13 @@ export function createVoiceUpgrade(
       // ws v8 delivers BOTH text and binary frames as a Buffer; only the
       // `isBinary` flag distinguishes them. Text frames carry our JSON control
       // messages, binary frames carry mic PCM16.
+      /* v8 ignore start -- ws v8 的 RawData 恒为 Buffer，数组/ArrayBuffer 分支只存在于旧版 ws 的类型联合中 */
       const buf = Buffer.isBuffer(data)
         ? data
         : Array.isArray(data)
           ? Buffer.concat(data)
           : Buffer.from(data)
+      /* v8 ignore stop */
       if (isBinary) {
         if (buf.length > MAX_FRAME_BYTES) return // 异常大帧拒绝
         session.feedAudio(buf)
@@ -308,6 +315,7 @@ export function createVoiceUpgrade(
         const msg = parsed as Record<string, unknown>
         // 迟到/乱序消息拒绝：带 voiceSessionId 的控制消息必须属于本会话。
         // （不带 id 的消息向后兼容放行；config 在 ready 前发出，不校验。）
+        /* v8 ignore next -- 箭头声明与 body 跨行时 v8 对声明行计数为 0（行为由各 case 的 isMySession 调用覆盖） */
         const isMySession = (m: Record<string, unknown>): boolean =>
           typeof m.voiceSessionId !== 'string' || m.voiceSessionId === session.voiceSessionId
         switch (msg.type) {
