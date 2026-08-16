@@ -24,5 +24,6 @@
 - button "Commands" [disabled]:
   - img
 - 'button "Access mode, current: Custom" [disabled]': Custom
+- button "Real-time voice"
 - button "Stop generating"
 - button "Send message" [disabled]
