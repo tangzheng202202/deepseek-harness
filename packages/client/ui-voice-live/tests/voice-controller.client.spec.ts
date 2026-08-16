@@ -652,6 +652,33 @@ describe('自动重连（单重连器）', () => {
   })
 })
 
+describe('打断 150ms：同步停播放', () => {
+  it('回复播放中再次 start：pause 在同步调用栈内执行（无 await 间隙，远小于 150ms）', async () => {
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: 'x' }))
+    // host 回复 TTS 开始播放
+    ws.__msg(JSON.stringify({ type: 'tts_start', ttsId: '1', text: '回复' }))
+    ws.__msg(new ArrayBuffer(8))
+    ws.__msg(JSON.stringify({ type: 'tts_done', ttsId: '1' }))
+    const a = FakeAudio.instances[0]
+    expect(a?.playing).toBe(true)
+
+    // 打断：再次 start（同步调用栈内应已 pause）
+    const p = c.start()
+    await flush()
+    expect(a?.playing).toBe(false) // 无需等待任何异步：pause 已同步执行
+    expect(FakeWS.alive.length).toBeLessThanOrEqual(1)
+    // 清理新连接
+    lastWS().__open()
+    lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's2', hasKey: true }))
+    await p
+    c.cancel()
+    expect(FakeWS.alive.length).toBe(0)
+  })
+})
+
 describe('试听 previewVoice', () => {
   it('由 tts_done + audio ended 完成，无固定 sleep', async () => {
     vi.useFakeTimers()
