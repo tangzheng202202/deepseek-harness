@@ -33,6 +33,7 @@ DSH 的实时语音交互最初是临时 Python 旁路加前端 DOM 扫描钩子
 
 ## 验证
 
-- 包内 71 个 vitest 测试（协议、信任栅栏、控制器状态机、ABA 资源核算、自动断句、重连、先响应后思考），外加仓库门禁：`test:gui`（3828 个测试）、全仓 typecheck、`verify-package-invariants`、staged lint。
+- 包内 130 个 vitest 测试、单文件覆盖率 100%（协议、信任栅栏、控制器状态机、ABA 资源核算、自动断句、重连、先响应后思考、唤醒词、实时字幕、AEC 探针、打断同步停播、错误/防御分支），外加仓库门禁：`test:gui`、全仓 typecheck、`verify-package-invariants`、staged lint、金锭回放（`DSH_SNAPSHOT=replay`）。
+- 覆盖率加固暴露并修复了一个协议缺陷（有测试钉住）：TTS 合成失败时原先会在 `tts_error` 之后继续补发 `tts_done`；播放以 done 事件为键，失败现在只发 `tts_error`。`/* v8 ignore */` 注释均带原因，只用于真正不可达的防御代码（旧版 ws 的 RawData 联合、pump 的 shift 守卫、跨行箭头声明的计数问题）。
 - 真实火山冒烟：`/voice` 上 TTS 合成；用 macOS `say` 人声 PCM 验证自动断句——不发 `asr_end` 也会在静音约 1.5 秒后收到 definite final。
-- 已知限制：本包 `*.host.spec.ts` 测试被排除在仓库 host aggregate 的 typecheck 之外（host aggregate 排除 `packages/client/*/src/**` 触发 TS6307）；它们在 vitest 下运行，宿主半部经包级 `tsc -b` 构建。
+- 已知限制：本包 `*.host.spec.ts` 测试被排除在仓库 host aggregate 的 typecheck 之外（host aggregate 排除 `packages/client/*/src/**` 触发 TS6307）；它们在 vitest 下运行，宿主半部经包级 `tsc -b` 构建。node 环境的唤醒词测试放在 `*.client.spec.ts` 后缀下，使其归入 client aggregate 类型检查。

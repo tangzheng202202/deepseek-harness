@@ -84,14 +84,24 @@ Key decisions:
 
 ## Verification
 
-- 71 vitest tests in the package (protocol, trust fence, controller state
-  machine, ABA resource accounting, auto endpointing zeroing, reconnect,
-  reply-first), plus the repo gates: `test:gui` (3828 tests), full-repo
-  typecheck, `verify-package-invariants`, staged lint.
+- 130 vitest tests in the package at 100% per-file coverage (protocol, trust
+  fence, controller state machine, ABA resource accounting, auto endpointing
+  zeroing, reconnect, reply-first, wake word, captions, AEC probe, interrupt
+  sync-pause, error/defensive branches), plus the repo gates: `test:gui`,
+  full-repo typecheck, `verify-package-invariants`, staged lint, golden replay
+  (`DSH_SNAPSHOT=replay`).
+- Coverage hardening surfaced one protocol bug, fixed and pinned by a test: a
+  failed TTS synthesis used to emit `tts_done` right after `tts_error`;
+  playback is keyed on done events, so a failure now emits `tts_error` only.
+  `/* v8 ignore */` comments carry reasons and are limited to genuinely
+  unreachable defensive code (old-ws RawData union, pump shift guard,
+  cross-line arrow-declaration count).
 - Live smoke against real Volcengine: TTS synthesis over `/voice`, and
   auto-endpointing verified with macOS `say` speech PCM — a definite final
   arrives after ~1.5 s of silence with no `asr_end`.
 - Known limitation: the package's `*.host.spec.ts` files are excluded from the
   repository host aggregate's typecheck (TS6307 tripped by the aggregate
   excluding `packages/client/*/src/**`); they run under vitest and the host
-  half builds through the package `tsc -b`.
+  half builds through the package `tsc -b`. The node-environment wake-word
+  spec lives under the `*.client.spec.ts` suffix so it type-checks in the
+  client aggregate.
