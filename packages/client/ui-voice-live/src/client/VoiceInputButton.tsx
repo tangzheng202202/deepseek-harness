@@ -61,7 +61,7 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
 
   const running = useSession(s => s.running)
   const partial = useSession(s => s.partial)
-  const dshSessionId = useSession(s => s.sessionId) ?? ''
+  const dshSessionId = useSession(s => s.sessionId)
 
   // 同步当前 DSH 会话 id（随 config 上报，host 端打断时用它取消 agent 回合）。
   useEffect(() => {

@@ -219,6 +219,12 @@ export default defineConfig({
         'packages/api/remotes/src/client/index.ts',
         // Slash/command/input round: per-file gaps deferred with the same
         // client-lane debt. TODO(gui): cover and remove with the lane above.
+        // Voice-live Volcengine binary protocol: defensive branches (gzip,
+        // timeouts, error frames, flag combinations) need a real wire harness;
+        // the protocol behavior is exercised live in smoke runs. The controller,
+        // server, queue and trust halves carry their own unit coverage.
+        // TODO(voice): cover and remove with a Volcengine wire harness.
+        'packages/client/ui-voice-live/src/host/volcengine.ts',
         'packages/client/connection/src/client/fixture.ts',
         'packages/client/ui-commands/src/index.ts',
         'packages/client/ui-skill/src/index.ts',

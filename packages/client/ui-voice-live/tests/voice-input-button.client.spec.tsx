@@ -98,4 +98,33 @@ describe('VoiceInputButton', () => {
     view.unmount()
     expect(controller.cancel).toHaveBeenCalledOnce()
   })
+
+  it('handles null partial, non-voice turns and no-delta turns without narration', async () => {
+    const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
+    let snapshot: Record<string, unknown> = { running: false, partial: null }
+    const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
+    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    const view = render(<VoiceInputButton {...props} />)
+    fireEvent.click(view.container.querySelector('button')!) // 创建 controller
+    const controller = h.instances[0]!
+
+    // 语音回合启动：先经 onFinal 置位 voiceTurn，再 running true
+    await act(async () => { controller.callbacks.onFinal('问题') })
+    snapshot = { running: true, partial: null }
+    view.rerender(<VoiceInputButton {...props} />)
+    expect(controller.pushReplyText).not.toHaveBeenCalled()
+
+    // 无增量：spokenLen 已等于正文长度 → 不重复推送
+    snapshot = { running: true, partial: { blocks: [{ kind: 'text', text: '第一句。' }] } }
+    view.rerender(<VoiceInputButton {...props} />)
+    snapshot = { running: true, partial: { blocks: [{ kind: 'text', text: '第一句。' }] } }
+    view.rerender(<VoiceInputButton {...props} />)
+    expect(controller.pushReplyText).toHaveBeenCalledTimes(1)
+
+    // 语音回合结束：flush 尾巴并结束应答模式（正确行为）
+    snapshot = { running: false, partial: null }
+    view.rerender(<VoiceInputButton {...props} />)
+    expect(controller.flushReply).toHaveBeenCalledTimes(1)
+    expect(controller.endReply).toHaveBeenCalledTimes(1)
+  })
 })

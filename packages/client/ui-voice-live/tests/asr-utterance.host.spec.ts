@@ -97,6 +97,20 @@ describe('AsrUtterance', () => {
     expect(cancelled.push(Buffer.from([1]))).toBe(false)
   })
 
+  it('end after cancel is a no-op (finished guard)', async () => {
+    const onFinal = vi.fn()
+    const onPartial = vi.fn()
+    const onError = vi.fn()
+    const ut = new AsrUtterance('key', '1', onFinal, onPartial, onError)
+    ut.start()
+    ut.push(Buffer.alloc(1280))
+    ut.cancel()
+    ut.end() // finished 后 end 不应 abort/抛错，也不应产生 final
+    await new Promise(r => setTimeout(r, 20))
+    expect(onFinal).not.toHaveBeenCalled()
+    expect(onError).not.toHaveBeenCalled()
+  })
+
   it('rejects an individual frame larger than the bounded queue', () => {
     const turn = new AsrUtterance('key', 'u4', vi.fn(), vi.fn(), vi.fn())
     expect(turn.push(Buffer.alloc(1024 * 1024 + 1))).toBe(false)

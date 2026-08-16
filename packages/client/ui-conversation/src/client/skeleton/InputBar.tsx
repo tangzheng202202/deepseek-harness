@@ -199,6 +199,7 @@ export function InputBar({
   const revealSelectionFocus = (el: HTMLTextAreaElement): void => {
     // selectionStart/End are number|null in lib.dom; the type-aware lint program narrows them.
     const caret = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd
+    // oxlint-disable-next-line no-unnecessary-condition -- lib.dom says number|null; the type-aware program narrows it
     revealCaret(caret ?? el.value.length)
   }
 
@@ -281,6 +282,7 @@ export function InputBar({
     // IME guard so a composition-closing Shift+Enter still breaks the line.
     if (e.key === 'Enter' && e.shiftKey) return
     // keyCode 229 is the legacy IME-composition signal engines emit without isComposing.
+    // oxlint-disable-next-line no-deprecated -- keyCode 229 is the legacy IME signal without isComposing
     const composing = composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       if (keyboard.arbitrate(e.key === 'ArrowUp' ? 'up' : 'down', composing) === 'consumed') e.preventDefault()
@@ -343,6 +345,7 @@ export function InputBar({
     const next = e.target.value
     keyboard.setDraft(next)
     // selectionStart is number|null in lib.dom; the type-aware lint program narrows it.
+    // oxlint-disable-next-line no-unnecessary-condition -- selectionStart is number|null in lib.dom
     keyboard.track(next, e.target.selectionStart ?? next.length)
   }
 
@@ -356,7 +359,9 @@ export function InputBar({
   // machine owns the transaction log.
   // selectionStart/End are number|null in lib.dom; the type-aware lint program narrows them.
   const selectionOf = (el: HTMLTextAreaElement) => ({
+    // oxlint-disable-next-line no-unnecessary-condition -- selectionStart/End are number|null in lib.dom
     start: el.selectionStart ?? 0,
+    // oxlint-disable-next-line no-unnecessary-condition -- selectionEnd is number|null in lib.dom
     end: el.selectionEnd ?? el.selectionStart ?? 0,
   })
 

@@ -56,3 +56,15 @@ describe('VoiceSettingsSection', () => {
     expect(screen.getByText('后端不可用')).toBeTruthy()
   })
 })
+
+describe('VoiceSettingsSection reply-first toggle', () => {
+  it('toggles the reply-first checkbox and persists the choice', () => {
+    const view = render(<VoiceSettingsSection {...({ t } as unknown as Parameters<typeof VoiceSettingsSection>[0])} />)
+    const checkbox = view.container.querySelector('input[type="checkbox"]')!
+    expect((checkbox as HTMLInputElement).checked).toBe(true) // 默认开
+    fireEvent.click(checkbox)
+    expect(localStorage.getItem('dsh-voice-reply-first')).toBe('0')
+    fireEvent.click(checkbox)
+    expect(localStorage.getItem('dsh-voice-reply-first')).toBe('1')
+  })
+})

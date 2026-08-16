@@ -105,6 +105,8 @@ class FakeAudio {
 
 let gumImpl: (constraints?: MediaStreamConstraints) => Promise<FakeStream> =
   () => Promise.resolve(new FakeStream())
+/** getUserMedia 的 mock（供断言约束，避免 unbound-method）。 */
+let gumMock: Mock<(c?: MediaStreamConstraints) => Promise<FakeStream>>
 
 function installFakes(): void {
   vi.stubGlobal('window', { location: { protocol: 'http:', host: '127.0.0.1:3080' } })
@@ -112,8 +114,9 @@ function installFakes(): void {
   vi.stubGlobal('AudioContext', FakeAudioContext)
   vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode)
   vi.stubGlobal('Audio', FakeAudio)
+  gumMock = vi.fn((c?: MediaStreamConstraints) => gumImpl(c))
   vi.stubGlobal('navigator', {
-    mediaDevices: { getUserMedia: vi.fn((c?: MediaStreamConstraints) => gumImpl(c)) },
+    mediaDevices: { getUserMedia: gumMock },
   })
   const store = new Map<string, string>()
   vi.stubGlobal('localStorage', {
@@ -236,9 +239,9 @@ describe('先响应后思考', () => {
     c.stop()
     ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '帮我查天气' }))
     // 开场白已作为 tts_push 推给后端
-    const pushes = ws.sent.filter(s => typeof s === 'string' && s.includes('"tts_push"'))
+    const pushes = ws.sent.filter((s): s is string => typeof s === 'string' && s.includes('"tts_push"'))
     expect(pushes.length).toBeGreaterThanOrEqual(1)
-    expect(String(pushes[0])).toContain('好的，我去查一下')
+    expect(pushes[0]?.includes('好的，我去查一下')).toBe(true)
     // 正式回复随后也可继续推送
     c.pushReplyText('今天晴转多云。')
     expect(ws.sent.filter(s => typeof s === 'string' && s.includes('今天晴转多云'))).toHaveLength(1)
@@ -534,9 +537,9 @@ describe('barge-in：会话 id 上报', () => {
     const { c } = makeController()
     c.setDshSessionId('dsh-sess-42')
     const ws = await startReady(c)
-    const config = ws.sent.find(s => typeof s === 'string' && s.includes('"config"'))
+    const config = ws.sent.find((s): s is string => typeof s === 'string' && s.includes('"config"'))
     expect(config).toBeDefined()
-    expect(String(config)).toContain('"dshSessionId":"dsh-sess-42"')
+    expect(config?.includes('"dshSessionId":"dsh-sess-42"')).toBe(true)
     expect(FakeWS.alive.length).toBe(1)
     c.cancel()
     expect(FakeWS.alive.length).toBe(0)
@@ -547,8 +550,7 @@ describe('barge-in：会话 id 上报', () => {
     expect(c.getMicAec()).toBeNull() // 未采集
     const p = c.start()
     await flush()
-    const gum = navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>
-    expect(gum).toHaveBeenCalledWith({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+    expect(gumMock).toHaveBeenCalledWith({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
     lastWS().__open()
     lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
     await p
@@ -564,8 +566,7 @@ describe('barge-in：会话 id 上报', () => {
     const c2 = new VC(cb, false)
     const p = c2.start()
     await flush()
-    const gum = navigator.mediaDevices.getUserMedia as ReturnType<typeof vi.fn>
-    expect(gum).toHaveBeenLastCalledWith({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: true } })
+    expect(gumMock).toHaveBeenLastCalledWith({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: true } })
     lastWS().__open()
     lastWS().__msg(JSON.stringify({ type: 'ready', voiceSessionId: 's', hasKey: true }))
     await p
@@ -631,7 +632,7 @@ describe('自动重连（单重连器）', () => {
       await vi.advanceTimersByTimeAsync(16_000) // 覆盖退避 + connect 超时
     }
     expect(cb.onError).toHaveBeenCalled()
-    expect(String(cb.onError.mock.calls.at(-1)?.[0] ?? '')).toContain('重连失败')
+    expect(cb.onError.mock.calls.at(-1)?.[0] ?? '').toContain('重连失败')
     // failed 是 fail() 的中间态（onState 先收到 failed，随后 teardown 回 idle）
     expect(cb.onState.mock.calls.some(call => call[0] === 'failed')).toBe(true)
     expect(c.currentState).toBe('idle')
