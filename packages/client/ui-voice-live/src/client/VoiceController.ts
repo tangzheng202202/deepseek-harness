@@ -258,6 +258,8 @@ export class VoiceController {
   constructor(
     private readonly callbacks: VoiceCallbacks,
     private readonly echoCancellation = true,
+    /** 「先响应后思考」开场白；非空时每次语音提交后先朗读它，再排 agent 正式回复。 */
+    private readonly replyFirstText = '',
   ) {
     this.playback.onIdle = () => { this.maybeFinishReply() }
   }
@@ -534,6 +536,8 @@ export class VoiceController {
     this.replyDone = false
     this.replyServerIdle = false
     this.armReplyTimer()
+    // 先响应后思考：先朗读开场白，agent 正式回复随后排队（同一声道串行播放）。
+    if (this.replyFirstText !== '') this.pushReplyText(this.replyFirstText)
   }
 
   private maybeFinishReply(): void {

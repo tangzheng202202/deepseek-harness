@@ -7,8 +7,9 @@ import { useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconPlayOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
-  getActiveProvider, getActiveVoice,
-  previewVoice, type PreviewResult, PROVIDERS, setActiveProvider, setActiveVoice, VOICE_OPTIONS,
+  getActiveProvider, getActiveVoice, getReplyFirst,
+  previewVoice, type PreviewResult, PROVIDERS, setActiveProvider, setActiveVoice,
+  setReplyFirst, VOICE_OPTIONS,
 } from './usePipelineVoice.ts'
 import css from './VoiceSettingsSection.module.css'
 
@@ -18,6 +19,7 @@ export type VoiceSettingsSectionProps =
 export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
   const [provider, setProvider] = useState(getActiveProvider())
   const [voice, setVoice] = useState(getActiveVoice())
+  const [replyFirst, setReplyFirstState] = useState(getReplyFirst())
   const [previewing, setPreviewing] = useState(false)
   const [previewResult, setPreviewResult] = useState<PreviewResult | null>(null)
 
@@ -62,6 +64,18 @@ export function VoiceSettingsSection({ t }: VoiceSettingsSectionProps) {
           </button>
         </div>
       </div>
+
+      <label className={css.field}>
+        <span className={css.label}>
+          <input
+            type="checkbox"
+            className={css.checkbox}
+            checked={replyFirst}
+            onChange={(e) => { setReplyFirstState(e.target.checked); setReplyFirst(e.target.checked) }}
+          />
+          {t('voice.replyFirst')}
+        </span>
+      </label>
 
       {previewResult !== null && (
         <p className={previewResult.ok ? css.okHint : css.errHint}>{previewResult.message}</p>

@@ -16,6 +16,7 @@ export const zh = {
   'voice.mic': '实时语音',
   'voice.micActive': '实时语音对话中（点击结束）',
   'voice.backendKeyHint': 'API Key 由后端提供（~/.dsh/api-key.env 中的 VOLCENGINE_API_KEY），无需在此填写。',
+  'voice.replyFirst': '先响应后思考（说完先回应一句，再让助手去查）',
 }
 
 /** English dictionary. */
@@ -31,6 +32,7 @@ export const en = {
   'voice.mic': 'Real-time voice',
   'voice.micActive': 'Real-time voice on (click to end)',
   'voice.backendKeyHint': 'The API key is provided by the backend (VOLCENGINE_API_KEY in ~/.dsh/api-key.env).',
+  'voice.replyFirst': 'Reply first, then think (acknowledge the request before the assistant goes to look it up)',
 }
 
 export type VoiceKey = keyof typeof zh

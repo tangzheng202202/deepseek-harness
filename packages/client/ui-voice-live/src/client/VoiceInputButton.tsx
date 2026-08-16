@@ -12,6 +12,7 @@ import clsx from 'clsx'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PartialAssistant } from '@deepseek-ai/dsh-client-runtime/client'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { getReplyFirst, REPLY_FIRST_TEXT } from './usePipelineVoice.ts'
 import { VoiceController, type VoiceState } from './VoiceController.ts'
 import css from './VoiceInputButton.module.css'
 
@@ -53,7 +54,7 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
           inputActions.submit()
         },
         onError: (message) => { setError(message) },
-      })
+      }, undefined, getReplyFirst() ? REPLY_FIRST_TEXT : '')
     }
     return controllerRef.current
   }
@@ -112,9 +113,11 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
         }}
       >
         {active ? (
-          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
-            <rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="currentColor" />
-          </svg>
+          <span className={css.orb} aria-hidden>
+            <span className={css.orbCore} />
+            <span className={css.orbRing} />
+            <span className={css.orbRing} />
+          </span>
         ) : (
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
             <path d="M8 1a2.5 2.5 0 0 1 2.5 2.5v3a2.5 2.5 0 1 1-5 0v-3A2.5 2.5 0 0 1 8 1Z" fill="currentColor" />

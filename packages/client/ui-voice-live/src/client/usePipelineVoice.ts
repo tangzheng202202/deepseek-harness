@@ -63,6 +63,20 @@ export function setActiveProvider(provider: string): void {
   }
 }
 
+/** 「先响应后思考」开场白（语音提交后立即朗读，agent 正式回复随后排队）。 */
+export const REPLY_FIRST_TEXT = '好的，我去查一下。'
+
+/** 是否开启「先响应后思考」（默认开）。 */
+export function getReplyFirst(): boolean {
+  if (typeof localStorage === 'undefined') return true
+  return localStorage.getItem('dsh-voice-reply-first') !== '0'
+}
+
+export function setReplyFirst(on: boolean): void {
+  if (typeof localStorage === 'undefined') return
+  localStorage.setItem('dsh-voice-reply-first', on ? '1' : '0')
+}
+
 /** 试听结果。 */
 export interface PreviewResult { ok: boolean; message: string }
 

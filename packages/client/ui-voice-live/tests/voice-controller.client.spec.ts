@@ -229,6 +229,38 @@ function emitMicFrame(): void {
   node.port.onmessage({ data: new Float32Array(2048).fill(0.5) })
 }
 
+describe('先响应后思考', () => {
+  it('开启时：final 提交进入应答模式即推送开场白（排在正式回复之前）', async () => {
+    const cb: Callbacks = { onFinal: vi.fn(), onPartial: vi.fn(), onError: vi.fn(), onState: vi.fn() }
+    const c = new VoiceController(cb, undefined, '好的，我去查一下。')
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: '帮我查天气' }))
+    // 开场白已作为 tts_push 推给后端
+    const pushes = ws.sent.filter(s => typeof s === 'string' && s.includes('"tts_push"'))
+    expect(pushes.length).toBeGreaterThanOrEqual(1)
+    expect(String(pushes[0])).toContain('好的，我去查一下')
+    // 正式回复随后也可继续推送
+    c.pushReplyText('今天晴转多云。')
+    expect(ws.sent.filter(s => typeof s === 'string' && s.includes('今天晴转多云'))).toHaveLength(1)
+    c.endReply()
+    expect(FakeWS.alive.length).toBe(1) // 等 host flush 确认
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
+    expect(FakeWS.alive.length).toBe(0)
+  })
+
+  it('关闭时（replyFirstText 为空）不推送开场白', async () => {
+    const { c } = makeController()
+    const ws = await startReady(c)
+    c.stop()
+    ws.__msg(JSON.stringify({ type: 'asr_final', voiceSessionId: 'sess', text: 'x' }))
+    expect(ws.sent.some(s => typeof s === 'string' && s.includes('"tts_push"'))).toBe(false)
+    c.endReply()
+    ws.__msg(JSON.stringify({ type: 'tts_idle', voiceSessionId: 'sess' }))
+    expect(FakeWS.alive.length).toBe(0)
+  })
+})
+
 /* ---------------- tests ---------------- */
 
 describe('ABA：30x start/stop', () => {
