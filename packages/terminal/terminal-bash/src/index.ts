@@ -60,15 +60,6 @@ function childEnvironment(spec: TerminalBackendSpawnSpec, dialect: ShellDialect)
     TERM: 'dumb',
     PAGER: 'cat',
     GIT_PAGER: 'cat',
-<<<<<<< HEAD
-    PS1: CONTROLLED_PROMPT,
-    // Re-asserting PS1 after the marker keeps prompt readiness working when a
-    // command overwrote the shell variable: bash runs PROMPT_COMMAND before
-    // rendering each prompt, so an override never survives to the next prompt.
-    PROMPT_COMMAND: `printf "\\033]133;D;%s\\007" "$?"; PS1='${CONTROLLED_PROMPT}'`,
-    BASH_SILENCE_DEPRECATION_WARNING: '1',
-=======
->>>>>>> origin/master
     DSH_SHELL: '1',
     DSH_SESSION_ID: spec.owner.id,
     DSH_PTY_SESSION_ID: spec.sessionId,
