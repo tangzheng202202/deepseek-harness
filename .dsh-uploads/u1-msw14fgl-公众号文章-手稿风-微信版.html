@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepSeek Harness 手搓实时语音：踩了 8 个坑，验了 30 个音色，代码全开源</title>
+</head>
+<body style="margin:0;padding:0;background-color:#e8e2d2;">
+<div style="max-width:677px;margin:0 auto;background-color:#f7f1e0;font-family:'Kaiti SC','STKaiti','KaiTi','KaiTi_GB2312','STSong','SimSun',serif;">
+
+  <!-- ========== 手稿封面 ========== -->
+  <section style="padding:30px 20px 24px;background-color:#f7f1e0;border-bottom:3px double #8a7d5c;">
+    <div style="border:2px solid #1f2a44;padding:4px;background-color:#fdf9ec;">
+      <div style="border:1px solid #1f2a44;padding:24px 16px 22px;text-align:center;">
+        <p style="margin:0 0 12px;text-align:right;"><span style="display:inline-block;background-color:#b03a2e;border-radius:5px;padding:8px 10px;font-size:13px;font-weight:700;color:#fdf6e3;line-height:1.3;letter-spacing:2px;">开源<br>可复现</span></p>
+        <p style="margin:0 0 10px;font-size:12px;letter-spacing:6px;color:#8a7d5c;">实验记录 · 第壹号</p>
+        <h1 style="margin:0 0 12px;font-size:26px;line-height:1.55;color:#1f2a44;font-weight:700;letter-spacing:2px;">DeepSeek Harness<br>手搓实时语音</h1>
+        <p style="margin:0 0 14px;font-size:14px;color:#5a5340;letter-spacing:1px;">—— 语音进、语音出，大脑还是那个智能体 ——</p>
+        <p style="margin:0;font-size:12.5px;color:#8a7d5c;letter-spacing:1px;">8 个坑 · 30 个音色 · 1353 行代码 · 全部开源</p>
+      </div>
+    </div>
+    <p style="margin:16px 0 0;text-align:center;font-size:12px;color:#a09478;letter-spacing:2px;">✎ 本稿所录代码与截图，都是真实跑出来的东西</p>
+  </section>
+
+  <!-- ========== 缘起 ========== -->
+  <section style="padding:26px 22px 0;background-color:#f7f1e0;">
+    <h2 style="margin:0 0 14px;font-size:20px;color:#1f2a44;font-weight:700;letter-spacing:2px;border-bottom:2px solid #1f2a44;display:inline-block;padding-bottom:4px;">缘起</h2>
+    <p style="margin:0 0 12px;font-size:15.5px;line-height:2.1;color:#2c3040;text-indent:2em;">最初的问题很简单：<strong>能不能让这个 DeepSeek 智能体跟我实时语音对话？</strong>调研了一圈国内模型，发现一个尴尬的事实——</p>
+    <ul style="margin:0 0 12px;padding-left:2em;font-size:15px;line-height:2.05;color:#2c3040;">
+      <li style="margin-bottom:6px;"><strong>Kimi K3</strong>：只有文本和图像，没有音频，只能自己拼管线；</li>
+      <li style="margin-bottom:6px;"><strong>豆包实时语音 3.0 / Qwen-Omni / GLM-Realtime</strong>：确实能全双工语音对话，但跟你聊的是<strong>它们自己的模型</strong>——你的会话上下文、你挂的工具，它一概不知。</li>
+    </ul>
+    <p style="margin:0 0 14px;font-size:15.5px;line-height:2.1;color:#2c3040;text-indent:2em;">而我要的是：<strong>大脑还是当前这个智能体</strong>，语音只管进和出。</p>
+
+    <!-- 红笔批注：金句 -->
+    <div style="margin:0 0 16px;padding:14px 16px;border-left:4px solid #b03a2e;background-color:#fdf6e3;">
+      <p style="margin:0 0 4px;font-size:12px;color:#b03a2e;letter-spacing:2px;">✎ 红笔批注</p>
+      <p style="margin:0;font-size:16.5px;line-height:1.9;color:#8c2b20;font-weight:700;">「最好的架构决策不是换脑——<br>脑不动，只换耳朵和嘴巴。」</p>
+    </div>
+
+    <!-- 管线图（无手绘圆角，改为药丸框） -->
+    <p style="margin:0 0 10px;font-size:15.5px;line-height:2.1;color:#2c3040;text-indent:2em;">所以最终方案不是「换模型」，而是一条管线：</p>
+    <div style="margin:0 0 8px;padding:18px 10px;background-color:#f2ecd8;border:1px dashed #8a7d5c;">
+      <p style="margin:0 0 12px;text-align:center;font-size:12px;letter-spacing:3px;color:#8a7d5c;">图一 · 管线架构</p>
+      <p style="margin:0;text-align:center;font-size:14px;color:#1f2a44;line-height:2;">
+        <span style="display:inline-block;border:2px solid #1f2a44;border-radius:999px;padding:6px 14px;background-color:#fdf9ec;">🎤 麦克风</span>
+        <span style="color:#b03a2e;"> ⟶ </span>
+        <span style="display:inline-block;border:2px solid #1f2a44;border-radius:999px;padding:6px 14px;background-color:#fdf9ec;">火山流式 ASR</span>
+      </p>
+      <p style="margin:0;text-align:center;color:#b03a2e;font-size:16px;line-height:1.5;">↓</p>
+      <p style="margin:0;text-align:center;">
+        <span style="display:inline-block;border:2px solid #b03a2e;border-radius:999px;padding:8px 18px;font-size:14.5px;font-weight:700;color:#8c2b20;background-color:#fdf6e3;">DeepSeek 智能体（大脑不动）</span>
+      </p>
+      <p style="margin:0;text-align:center;color:#b03a2e;font-size:16px;line-height:1.5;">↓</p>
+      <p style="margin:0;text-align:center;font-size:14px;color:#1f2a44;line-height:2;">
+        <span style="display:inline-block;border:2px solid #1f2a44;border-radius:999px;padding:6px 14px;background-color:#fdf9ec;">火山流式 TTS</span>
+        <span style="color:#b03a2e;"> ⟶ </span>
+        <span style="display:inline-block;border:2px solid #1f2a44;border-radius:999px;padding:6px 14px;background-color:#fdf9ec;">🔊 扬声器</span>
+      </p>
+      <p style="margin:8px 0 0;text-align:center;font-size:12px;color:#8a7d5c;">上下文、工具调用，一个不少</p>
+    </div>
+  </section>
+
+  <!-- ========== 实验纪要一览 ========== -->
+  <section style="padding:24px 22px 0;background-color:#f7f1e0;">
+    <h2 style="margin:0 0 12px;font-size:20px;color:#1f2a44;font-weight:700;letter-spacing:2px;border-bottom:2px solid #1f2a44;display:inline-block;padding-bottom:4px;">实验纪要 · 一览</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:14.5px;color:#2c3040;">
+      <tr>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fdf9ec;width:34%;font-weight:700;color:#1f2a44;">踩过的坑</td>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fffdf6;">8 个，个个反直觉，详见下文</td>
+      </tr>
+      <tr>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fdf9ec;font-weight:700;color:#1f2a44;">验证音色</td>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fffdf6;">30 个，逐一实测，全部返回有效音频</td>
+      </tr>
+      <tr>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fdf9ec;font-weight:700;color:#1f2a44;">代码增量</td>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fffdf6;">16 个文件，共 +1353 行</td>
+      </tr>
+      <tr>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fdf9ec;font-weight:700;color:#1f2a44;">回环校验</td>
+        <td style="border:1px solid #8a7d5c;padding:9px 10px;background-color:#fffdf6;">合成 → 解码 → 再识别，逐字一致（含标点）</td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- ========== 分隔 ========== -->
+  <p style="margin:0;padding:22px 0 0;text-align:center;font-size:15px;color:#b03a2e;letter-spacing:8px;background-color:#f7f1e0;">～ ～ ～</p>
+
+  <!-- ========== 八个坑 ========== -->
+  <section style="padding:20px 22px 0;background-color:#f7f1e0;">
+    <h2 style="margin:0 0 6px;font-size:20px;color:#1f2a44;font-weight:700;letter-spacing:2px;border-bottom:2px solid #1f2a44;display:inline-block;padding-bottom:4px;">八个坑全记录</h2>
+    <p style="margin:10px 0 16px;font-size:15px;line-height:2.05;color:#2c3040;text-indent:2em;">真正的故事从这里开始。每个坑都按「症状 → 根因 → 修法」三栏拆开，方便后来者对号入座。</p>
+
+    <!-- 第一难 -->
+    <div style="margin-bottom:16px;padding:16px 16px 14px;border:1px solid #8a7d5c;background-color:#fdf9ec;">
+      <p style="margin:0 0 8px;"><span style="display:inline-block;background-color:#b03a2e;color:#fdf6e3;font-size:13px;font-weight:700;padding:3px 12px;border-radius:999px;letter-spacing:2px;">第一难</span></p>
+      <p style="margin:0 0 10px;font-size:16.5px;font-weight:700;color:#1f2a44;letter-spacing:1px;">鉴权对不上，一上来就吃 400</p>
+      <p style="margin:0 0 8px;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#b03a2e;font-weight:700;">症状｜</span>火山语音有两代鉴权：旧的「App ID + Access Token」，新的「单个 API Key」。我接的库走旧鉴权，手里的却是新 Key，直接调就是 HTTP 400。</p>
+      <p style="margin:0 0 10px;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#2f5496;font-weight:700;">修法｜</span>不重写协议，<strong>monkey-patch 换掉鉴权头</strong>——只换 X-Api-* 那几个 header，二进制帧协议原样复用。</p>
+      <div style="background-color:#f2ecd8;border:1px solid #b8ab88;padding:12px 14px;">
+        <p style="margin:0;font-family:'Kaiti SC','STKaiti','KaiTi',serif;font-size:13.5px;line-height:1.85;color:#2f5496;">_wsc._build_headers = lambda app, token, res, rid: {<br>&nbsp;&nbsp;&nbsp;&nbsp;'X-Api-Key': api_key,<br>&nbsp;&nbsp;&nbsp;&nbsp;'X-Api-Resource-Id': res,<br>&nbsp;&nbsp;&nbsp;&nbsp;'X-Api-Connect-Id': uuid4(),<br>&nbsp;&nbsp;&nbsp;&nbsp;'X-Api-Request-Id': rid or uuid4(),<br>}</p>
+      </div>
+    </div>
+
+    <!-- 第二难（重点，红框） -->
+    <div style="margin-bottom:16px;padding:16px 16px 14px;border:2px solid #b03a2e;background-color:#fdf6e3;">
+      <p style="margin:0 0 8px;"><span style="display:inline-block;background-color:#b03a2e;color:#fdf6e3;font-size:13px;font-weight:700;padding:3px 12px;border-radius:999px;letter-spacing:2px;">第二难 · 最诡异</span></p>
+      <p style="margin:0 0 10px;font-size:16.5px;font-weight:700;color:#8c2b20;letter-spacing:1px;">「双音」：两个声音各读各的</p>
+      <p style="margin:0 0 8px;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#b03a2e;font-weight:700;">症状｜</span>回答读到一半，突然变成两个声音、各读一段，深夜听起来像有人在跟 AI 抢话筒。这个 bug 耗我最久。</p>
+      <p style="margin:0 0 8px;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#b03a2e;font-weight:700;">根因｜</span>后端逐句合成，<strong>上一句 mp3 还没播完，下一句 tts_done 就到了</strong>，浏览器 new Audio().play() 直接并发放——两句叠在一起了。</p>
+      <p style="margin:0 0 10px;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#2f5496;font-weight:700;">修法｜</span>播放改成<strong>顺序队列</strong>，前一句 ended 才出队播下一句：</p>
+      <div style="background-color:#f2ecd8;border:1px solid #b8ab88;padding:12px 14px;">
+        <p style="margin:0;font-family:'Kaiti SC','STKaiti','KaiTi',serif;font-size:13.5px;line-height:1.85;color:#2f5496;">let currentAudio = null<br>const pendingBlobs = []<br>function pump() {<br>&nbsp;&nbsp;if (currentAudio || pendingBlobs.length === 0) return<br>&nbsp;&nbsp;const item = pendingBlobs.shift()<br>&nbsp;&nbsp;currentAudio = new Audio(item.url)<br>&nbsp;&nbsp;currentAudio.onended = () =&gt; { currentAudio = null; pump() }<br>&nbsp;&nbsp;currentAudio.play()<br>}</p>
+      </div>
+      <p style="margin:10px 0 0;font-size:12.5px;color:#a09478;text-align:center;">✎ 根因简单得让人想笑，但找到它花了一整晚</p>
+    </div>
+
+    <!-- 三至六难 -->
+    <div style="margin-bottom:16px;padding:16px 16px 6px;border:1px solid #8a7d5c;background-color:#fdf9ec;">
+      <p style="margin:0 0 8px;"><span style="display:inline-block;background-color:#8a7d5c;color:#fdf6e3;font-size:13px;font-weight:700;padding:3px 12px;border-radius:999px;letter-spacing:2px;">三至六难</span></p>
+      <p style="margin:0 0 12px;font-size:16.5px;font-weight:700;color:#1f2a44;letter-spacing:1px;">四个「小」坑，每个都让人愣一下</p>
+
+      <div style="border-left:3px solid #c9bd97;padding-left:14px;margin-bottom:14px;">
+        <p style="margin:0 0 4px;font-size:15px;font-weight:700;color:#1f2a44;">🔁 它把上一轮的回答又读了一遍</p>
+        <p style="margin:0;font-size:14px;line-height:1.95;color:#4a4a52;">新一轮刚开始、新回答还没生成，这时「最后一条回答」还是旧的，朗读器当成新内容重读了。给每个回答行记个身份（data-chat-anchor-key），回合开始记 baseline，只读本轮新出现的行。</p>
+      </div>
+      <div style="border-left:3px solid #c9bd97;padding-left:14px;margin-bottom:14px;">
+        <p style="margin:0 0 4px;font-size:15px;font-weight:700;color:#1f2a44;">🗣️ 它读了我自己的话，还读了思考过程</p>
+        <p style="margin:0;font-size:14px;line-height:1.95;color:#4a4a52;">一开始抓的是「最后一行」，用户语音输入和英文推理全被念了。好在 DOM 里有现成的标记：用户消息是 data-chat-flow-kind="user"、回答是 assistant-step、思考块是 data-variant="think"。只抓回答行、剔除 think 块，立刻干净了。</p>
+      </div>
+      <div style="border-left:3px solid #c9bd97;padding-left:14px;margin-bottom:14px;">
+        <p style="margin:0 0 4px;font-size:15px;font-weight:700;color:#1f2a44;">⌨️ 键盘打字也朗读</p>
+        <p style="margin:0;font-size:14px;line-height:1.95;color:#4a4a52;">需求是「语音进才语音出，打字就安静回文字」。加一个 speakThisTurnRef 标记：只有语音识别到完整句（final）自动发送的回合才朗读。</p>
+      </div>
+      <div style="border-left:3px solid #c9bd97;padding-left:14px;margin-bottom:14px;">
+        <p style="margin:0 0 4px;font-size:15px;font-weight:700;color:#1f2a44;">#️⃣ 符号全被读出来</p>
+        <p style="margin:0;font-size:14px;line-height:1.95;color:#4a4a52;">**加粗**、# 标题、代码块、裸链接、emoji 直接丢给 TTS，会被一个字一个字念出来。送进去前先做一轮文本清洗，只留自然语言。</p>
+      </div>
+    </div>
+
+    <!-- 第七难 -->
+    <div style="margin-bottom:16px;padding:16px 16px 14px;border:1px solid #8a7d5c;background-color:#fdf9ec;">
+      <p style="margin:0 0 8px;"><span style="display:inline-block;background-color:#b03a2e;color:#fdf6e3;font-size:13px;font-weight:700;padding:3px 12px;border-radius:999px;letter-spacing:2px;">第七难</span></p>
+      <p style="margin:0 0 10px;font-size:16.5px;font-weight:700;color:#1f2a44;letter-spacing:1px;">30 个音色，一半是「李鬼」</p>
+      <p style="margin:0 0 8px;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#b03a2e;font-weight:700;">症状｜</span>用户要「排名前 30 的音色，还都要验证过」，但火山音色 ID 命名太像了——<span style="background-color:#efe6cc;border:1px solid #c9bd97;border-radius:4px;padding:0 5px;font-size:13px;color:#8c2b20;">_moon_bigtts</span>、<span style="background-color:#efe6cc;border:1px solid #c9bd97;border-radius:4px;padding:0 5px;font-size:13px;color:#8c2b20;">_mars_bigtts</span> 这类后缀其实是 seed-tts-1.0 的旧音色，丢进 2.0 接口直接报 resource mismatch。</p>
+      <p style="margin:0;font-size:14.5px;line-height:2;color:#2c3040;"><span style="color:#2f5496;font-weight:700;">修法｜</span>名字不能信，<strong>用真实 API Key 逐个合成实测</strong>。最终跑出 30 个真正可用的中文音色（女声/男声/童声/角色音都有），全部返回超过 1000 字节的有效 mp3。</p>
+      <p style="margin:10px 0 0;font-size:12.5px;color:#a09478;text-align:center;">✎ 名字会骗人，API 不会</p>
+    </div>
+
+    <!-- 第八难 -->
+    <div style="margin-bottom:0;padding:16px 16px 14px;border:1px solid #8a7d5c;background-color:#fdf9ec;">
+      <p style="margin:0 0 8px;"><span style="display:inline-block;background-color:#8a7d5c;color:#fdf6e3;font-size:13px;font-weight:700;padding:3px 12px;border-radius:999px;letter-spacing:2px;">第八难</span></p>
+      <p style="margin:0 0 10px;font-size:16.5px;font-weight:700;color:#1f2a44;letter-spacing:1px;">API Key 的隐私</p>
+      <p style="margin:0;font-size:14.5px;line-height:2;color:#2c3040;">Key 是敏感信息。设置页输入框默认 password 遮罩，加了 👁 显示/隐藏切换；后续还可以接入 DSH 的 credentials 服务托管，而不是存 localStorage。</p>
+    </div>
+  </section>
+
+  <!-- ========== 分隔 ========== -->
+  <p style="margin:0;padding:22px 0 0;text-align:center;font-size:15px;color:#b03a2e;letter-spacing:8px;background-color:#f7f1e0;">～ ～ ～</p>
+
+  <!-- ========== 最终效果 ========== -->
+  <section style="padding:20px 22px 0;background-color:#f7f1e0;">
+    <h2 style="margin:0 0 12px;font-size:20px;color:#1f2a44;font-weight:700;letter-spacing:2px;border-bottom:2px solid #1f2a44;display:inline-block;padding-bottom:4px;">最终效果</h2>
+    <div style="border:1px solid #8a7d5c;background-color:#fdf9ec;padding:14px 16px;margin-bottom:16px;">
+      <p style="margin:0 0 6px;font-size:14.5px;line-height:2;color:#2c3040;">🎤 <strong>语音问</strong>：边说边识别 → 自动发送 → 只读回答（单音色、顺序、无思考、无符号）</p>
+      <p style="margin:0 0 6px;font-size:14.5px;line-height:2;color:#2c3040;">⌨️ <strong>打字问</strong>：正常文字回复，不朗读</p>
+      <p style="margin:0;font-size:14.5px;line-height:2;color:#2c3040;">⚙️ <strong>设置页</strong>：服务商（火山/本地免费）+ API Key + 30 音色 + 一键试听</p>
+    </div>
+    <div style="border:1px solid #8a7d5c;background-color:#fffdf6;padding:8px;margin-bottom:14px;">
+      <img src="images/chat-voice-button.png" alt="聊天页语音按钮" style="display:block;width:100%;height:auto;border:1px solid #d8cdaa;">
+      <p style="margin:0;padding:8px 4px 4px;font-size:12.5px;color:#8a7d5c;text-align:center;letter-spacing:1px;">图二 · 输入框旁的 🎤 实时语音按钮</p>
+    </div>
+    <div style="border:1px solid #8a7d5c;background-color:#fffdf6;padding:8px;margin-bottom:8px;">
+      <img src="images/voice-settings.png" alt="语音交互设置页" style="display:block;width:100%;height:auto;border:1px solid #d8cdaa;">
+      <p style="margin:0;padding:8px 4px 4px;font-size:12.5px;color:#8a7d5c;text-align:center;letter-spacing:1px;">图三 · 「语音交互」设置页：服务商 / Key / 音色 / 试听</p>
+    </div>
+    <p style="margin:12px 0 0;font-size:13.5px;line-height:2;color:#4a4a52;background-color:#f2ecd8;border:1px dashed #b8ab88;padding:12px 14px;">质量验证也做了闭环：用 TTS 合成「今天天气很好，我们去公园散步吧。」→ 解码回 PCM16 → 再丢给 ASR 识别，结果<strong>逐字一致（含标点）</strong>。语音进出的两端，都站得住。</p>
+  </section>
+
+  <!-- ========== 分隔 ========== -->
+  <p style="margin:0;padding:22px 0 0;text-align:center;font-size:15px;color:#b03a2e;letter-spacing:8px;background-color:#f7f1e0;">～ ～ ～</p>
+
+  <!-- ========== 开源 ========== -->
+  <section style="padding:20px 22px 0;background-color:#f7f1e0;">
+    <h2 style="margin:0 0 12px;font-size:20px;color:#1f2a44;font-weight:700;letter-spacing:2px;border-bottom:2px solid #1f2a44;display:inline-block;padding-bottom:4px;">代码已开源，拿去就用</h2>
+    <div style="border:2px solid #1f2a44;background-color:#fdf9ec;padding:18px 16px;margin-bottom:14px;text-align:center;">
+      <p style="margin:0 0 10px;"><span style="display:inline-block;background-color:#b03a2e;border-radius:5px;padding:6px 10px;font-size:12px;font-weight:700;color:#fdf6e3;letter-spacing:2px;">已开源 · 可直接复现</span></p>
+      <p style="margin:0 0 8px;font-size:12px;letter-spacing:3px;color:#8a7d5c;">GITHUB FORK · 3 COMMITS · 16 FILES · +1353 LINES</p>
+      <p style="margin:0 0 10px;font-size:16.5px;font-weight:700;color:#1f2a44;">github.com/tangzheng202202/deepseek-harness</p>
+      <p style="margin:0;font-size:13px;line-height:1.95;color:#4a4a52;">前端 8 个文件（🎤 按钮 / 顺序播放 / 只读回答 / 设置页）<br>＋ 后端 examples/voice-pipeline/（火山流式 ASR + seed-tts-2.0）</p>
+    </div>
+    <p style="margin:0 0 8px;font-size:14.5px;line-height:2;color:#2c3040;">clone 下来，五步就能跑：</p>
+    <div style="background-color:#f2ecd8;border:1px solid #b8ab88;padding:12px 14px;margin-bottom:12px;">
+      <p style="margin:0;font-family:'Kaiti SC','STKaiti','KaiTi',serif;font-size:12.5px;line-height:1.85;color:#2f5496;">git clone https://github.com/tangzheng202202/deepseek-harness.git<br>cd deepseek-harness &amp;&amp; pnpm install<br>pnpm --filter @deepseek-ai/dsh-client-ui-conversation run bundle<br>pnpm --filter @deepseek-ai/dsh-client-ui-settings-general run bundle<br><br>cd examples/voice-pipeline<br>python3 -m venv .venv &amp;&amp; .venv/bin/python -m pip install -r requirements.txt<br>cp .env.example .env&nbsp;&nbsp;&nbsp;# 填你自己的火山 API Key<br>.venv/bin/python voice_server.py --port 3081</p>
+    </div>
+    <p style="margin:0;font-size:13px;line-height:1.95;color:#8a7d5c;">附记：上游 deepseek-ai/deepseek-harness 还在开发者预览期，暂时关闭了外部 PR，所以现在通过 fork 分发；等官方开放贡献，随时能从 fork 发 PR。</p>
+  </section>
+
+  <!-- ========== 分隔 ========== -->
+  <p style="margin:0;padding:22px 0 0;text-align:center;font-size:15px;color:#b03a2e;letter-spacing:8px;background-color:#f7f1e0;">～ ～ ～</p>
+
+  <!-- ========== 复盘 ========== -->
+  <section style="padding:20px 22px 0;background-color:#f7f1e0;">
+    <h2 style="margin:0 0 12px;font-size:20px;color:#1f2a44;font-weight:700;letter-spacing:2px;border-bottom:2px solid #1f2a44;display:inline-block;padding-bottom:4px;">复盘 · 三条最值钱的判断</h2>
+    <div style="border:1px solid #8a7d5c;background-color:#fdf9ec;padding:16px 16px 4px;margin-bottom:16px;">
+      <p style="margin:0 0 14px;font-size:15px;line-height:2;color:#2c3040;"><strong style="color:#b03a2e;">①「让当前智能体当大脑」决定了整个架构。</strong><br><span style="font-size:14px;color:#4a4a52;">不是换一个语音模型，而是语音只做输入输出层，智能体一行没动。</span></p>
+      <p style="margin:0 0 14px;font-size:15px;line-height:2;color:#2c3040;"><strong style="color:#b03a2e;">② 能复用就复用，别手搓协议。</strong><br><span style="font-size:14px;color:#4a4a52;">火山二进制协议自己写容易错，patch 一个鉴权头比重写整套稳得多。</span></p>
+      <p style="margin:0 0 14px;font-size:15px;line-height:2;color:#2c3040;"><strong style="color:#b03a2e;">③ DOM 标记是宝藏。</strong><br><span style="font-size:14px;color:#4a4a52;">data-chat-flow-kind、data-variant 这些语义标记，让「只读回答、跳过思考、跳过用户消息」变成一行选择器的事。</span></p>
+    </div>
+
+    <!-- 结语红批 -->
+    <div style="border:2px solid #b03a2e;background-color:#fdf6e3;padding:20px 18px;text-align:center;">
+      <p style="margin:0 0 8px;font-size:12px;color:#b03a2e;letter-spacing:3px;">✎ 卷末朱批</p>
+      <p style="margin:0;font-size:16.5px;line-height:1.95;color:#8c2b20;font-weight:700;">「名字会骗人，API 不会——<br>音色如此，架构也如此。」</p>
+    </div>
+  </section>
+
+  <!-- ========== 页脚 ========== -->
+  <section style="padding:24px 22px 36px;background-color:#f7f1e0;">
+    <div style="border-top:3px double #8a7d5c;padding-top:16px;">
+      <p style="margin:0 0 10px;font-size:14.5px;line-height:2;color:#2c3040;">如果你也在给自己的 Agent 接语音，或者踩过类似的坑，<strong>评论区聊聊你的「最诡异 bug」</strong>——点赞最高的，下期展开写。</p>
+      <p style="margin:0 0 14px;font-size:14px;line-height:2;color:#5a5340;">如果觉得有用，<strong style="color:#b03a2e;">点个「在看」👍，或者转发给正在搞语音的同事</strong>，就是对开源作者最大的支持。</p>
+      <p style="margin:0;font-size:12px;line-height:1.9;color:#a09478;">附：完整设计思路和实现细节见《正式报告.md》。文中截图和代码都是真实跑出来的东西。</p>
+    </div>
+    <p style="margin:18px 0 0;text-align:center;font-size:12px;color:#a09478;letter-spacing:3px;">—— 全文完 · 如蒙转载，注明出处 ——</p>
+  </section>
+
+</div>
+</body>
+</html>
