@@ -125,6 +125,14 @@ const DEFAULT_MAX_MESSAGES = 50
  */
 const WEB_SETTINGS_NAMESPACES = [
   'agent-loop', 'shell', 'locale', 'permission', 'ui-conversation', 'ui-theme', 'web-search-deepseek',
+  // Fork-local: plugin-owned namespaces served on the settings page for this
+  // deployment (the @linxin666/dsh-web-ui-all bundle plus the local
+  // dsh-image-studio plugin). Each name matches the namespace its plugin
+  // registers; exposure here only surfaces the already-registered section.
+  'remote-web-ui', 'task-board', 'desktop-launcher', 'pet', 'aionui-panel', 'dsh-ssh', 'describe-image', 'image-studio',
+  // 2026-08-26: community-plugins 页自身与技能浏览器/皮肤中心的命名空间（否则设置表单
+  // 报 settings-not-exposed）。
+  'community-plugins', 'dsh-skill-explorer', 'skin-wallpaper',
 ] as const
 
 /** Provider work budget: at most 100 calls and 2,000 inspected hits. */
