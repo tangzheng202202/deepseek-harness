@@ -67,7 +67,9 @@ describe('VoiceInputButton', () => {
     const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
     let snapshot: Record<string, unknown> = { running: false, partial: null }
     const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
-    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    // 迁移后流式正文从 ui-chat 的 chat 快照 legacy.partial 读取（useChat 注入）。
+    const useChat = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector({ legacy: { partial: snapshot.partial } }))
+    const props = { inputActions, useSession, useChat, t } as unknown as Parameters<typeof VoiceInputButton>[0]
     const view = render(<VoiceInputButton {...props} />)
     const button = view.container.querySelector('button')!
     expect(button.getAttribute('aria-pressed')).toBe('false')
@@ -82,7 +84,11 @@ describe('VoiceInputButton', () => {
 
     await act(async () => { controller.callbacks.onPartial('部分') })
     expect(inputActions.setDraft).toHaveBeenCalledWith('部分')
-    await act(async () => { controller.callbacks.onFinal('完整问题') })
+    await act(async () => {
+      controller.callbacks.onFinal('完整问题')
+      // onFinal 把 submit 推迟到宏任务（等 Lexical 投影落地），这里冲掉定时器。
+      await new Promise(resolve => { setTimeout(resolve, 0) })
+    })
     expect(inputActions.setDraft).toHaveBeenCalledWith('完整问题')
     expect(inputActions.submit).toHaveBeenCalledOnce()
 
@@ -123,7 +129,8 @@ describe('VoiceInputButton', () => {
     const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
     let snapshot: Record<string, unknown> = { running: false, partial: null }
     const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
-    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    const useChat = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector({ legacy: { partial: snapshot.partial } }))
+    const props = { inputActions, useSession, useChat, t } as unknown as Parameters<typeof VoiceInputButton>[0]
     const view = render(<VoiceInputButton {...props} />)
     fireEvent.click(view.container.querySelector('button')!) // 创建 controller
     const controller = h.instances[0]!
@@ -152,8 +159,10 @@ describe('VoiceInputButton', () => {
     localStorage.setItem('dsh-voice-wake', '1')
     localStorage.setItem('dsh-voice-wakeword', '你好小戴')
     const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
-    const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector({ running: false, partial: null }))
-    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    const snapshot: Record<string, unknown> = { running: false, partial: null }
+    const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
+    const useChat = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector({ legacy: { partial: snapshot.partial } }))
+    const props = { inputActions, useSession, useChat, t } as unknown as Parameters<typeof VoiceInputButton>[0]
     const view = render(<VoiceInputButton {...props} />)
     expect(wakeH.detector).not.toBeNull()
     expect(wakeH.detector?.start).toHaveBeenCalledOnce()
@@ -174,7 +183,8 @@ describe('VoiceInputButton', () => {
     const inputActions = { setDraft: vi.fn(), submit: vi.fn() }
     let snapshot: Record<string, unknown> = { running: false, partial: null }
     const useSession = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector(snapshot))
-    const props = { inputActions, useSession, t } as unknown as Parameters<typeof VoiceInputButton>[0]
+    const useChat = vi.fn((selector: (value: Record<string, unknown>) => unknown) => selector({ legacy: { partial: snapshot.partial } }))
+    const props = { inputActions, useSession, useChat, t } as unknown as Parameters<typeof VoiceInputButton>[0]
     const view = render(<VoiceInputButton {...props} />)
     fireEvent.click(view.container.querySelector('button')!) // 创建 controller
     const controller = h.instances[0]!

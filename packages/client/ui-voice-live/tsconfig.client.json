@@ -25,7 +25,10 @@
       "path": "../ui-primitives"
     },
     {
-      "path": "../runtime"
+      "path": "../ui-chat"
+    },
+    {
+      "path": "../ui-renderer"
     },
     {
       "path": "../ui-settings"

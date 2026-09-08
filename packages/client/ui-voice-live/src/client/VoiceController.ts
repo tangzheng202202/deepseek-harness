@@ -82,6 +82,17 @@ class AudioCapture {
       },
     })
     const ctx = new AudioContext({ sampleRate: 16000 })
+    // Chrome 会把非默认采样率的 AudioContext（以及用户激活不足的页面）以
+    // suspended 状态创建；不显式 resume 时 AudioWorklet 的 process() 永不
+    // 触发，麦克风一帧也发不出去——按钮常亮 listening 但识别毫无反应。
+    // resume() 在无音频设备/无激活的环境里可能长期 pending：加超时兜底，
+    // 绝不让 start() 卡在 acquiring。
+    if (ctx.state === 'suspended') {
+      await Promise.race([
+        ctx.resume().catch(() => {}),
+        new Promise<void>(resolve => { setTimeout(resolve, 500) }),
+      ])
+    }
     this.stream = stream
     this.ctx = ctx
     let blobUrl: string | null = null
@@ -99,6 +110,9 @@ class AudioCapture {
       src.connect(node)
       node.connect(mute)
       this.node = node
+      // 图建立后仍 suspended（首次 resume 超时竞速失败）时再补一次非阻塞
+      // resume：不阻塞 start()，环境一旦放行即自动恢复出帧。
+      if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
     } catch (error) {
       this.stop()
       throw error

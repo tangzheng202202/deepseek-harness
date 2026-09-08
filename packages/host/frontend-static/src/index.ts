@@ -101,7 +101,12 @@ export async function serveStatic(
     res.end()
     return
   }
-  res.writeHead(200, { 'content-type': type })
+  // Index HTML embeds per-launch module revisions; caching it makes browsers
+  // reuse stale revs after a restart, which 404s every /plugins module and
+  // leaves the SPA blank. Assets keep caching (they are content-hashed).
+  res.writeHead(200, type === HTML_MIME
+    ? { 'content-type': type, 'cache-control': 'no-store' }
+    : { 'content-type': type })
   res.end(body)
 }
 

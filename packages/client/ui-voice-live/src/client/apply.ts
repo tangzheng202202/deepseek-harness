@@ -1,10 +1,10 @@
 /** Registers the voice-live slots: composer mic control + settings section. */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // Type-only Context merges: make ctx.slots / ctx.locale and the target slot
 // declarations visible (settings.section, conversation.input.left, the
 // SessionStandardProps useInput/inputActions merge).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type {} from '@deepseek-ai/dsh-client-runtime/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { VoiceInputButton } from './VoiceInputButton.tsx'

@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { PartialAssistant } from '@deepseek-ai/dsh-client-runtime/client'
+import type { PartialAssistant } from '@deepseek-ai/dsh-client-ui-chat/client'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { getReplyFirst, REPLY_FIRST_TEXT } from './usePipelineVoice.ts'
 import { createWakeWordDetector, type WakeWordDetector } from './wake-word.ts'
@@ -36,7 +36,7 @@ function replyTextOf(p: PartialAssistant | null): string {
   return out
 }
 
-export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButtonProps) {
+export function VoiceInputButton({ inputActions, useSession, useChat, t }: VoiceInputButtonProps) {
   const [state, setState] = useState<VoiceState>('idle')
   const [error, setError] = useState<string | null>(null)
   /** 实时字幕：识别中把 asr_partial 悬浮显示在麦克风按钮上方。 */
@@ -59,7 +59,11 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
           voiceTurnRef.current = true // 语音发起回合：回复要朗读
           inputActions.setDraft(text)
           setCaption('')
-          inputActions.submit()
+          // Lexical 的 discrete 提交不会同步触发 update listener（projection
+          // 要到微任务之后才刷新）：同步紧随的 submit() 会读到旧投影——轻则
+          // 只发出上一条 partial（丢 final 尾部文字），重则短句时读到空稿
+          // 直接不发。推迟一个宏任务再提交，保证投影已落地。
+          setTimeout(() => { inputActions.submit() }, 0)
         },
         onError: (message) => { setError(message) },
       }, undefined, getReplyFirst() ? REPLY_FIRST_TEXT : '')
@@ -68,7 +72,11 @@ export function VoiceInputButton({ inputActions, useSession, t }: VoiceInputButt
   }
 
   const running = useSession(s => s.running)
-  const partial = useSession(s => s.partial)
+  // Migration: the streaming assistant text moved from the (removed)
+  // session-runtime `partial` projection to the ui-chat `chat` target's
+  // `legacy.partial`; ui-chat augments SessionStandardProps with `useChat`
+  // for every session seat.
+  const partial = useChat(s => s.legacy.partial)
   const dshSessionId = useSession(s => s.sessionId)
 
   // 同步当前 DSH 会话 id（随 config 上报，host 端打断时用它取消 agent 回合）。
