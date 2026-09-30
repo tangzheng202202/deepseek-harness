@@ -282,13 +282,11 @@ export class BrowserAuth {
   }
 
   /**
-   * Verify the authority-bound browser cookie on a Host request.
+   * Verify the authority-bound browser cookie on every Host request.
    * @param request - request headers carrying Host and Cookie.
    * @returns true only for an unexpired cookie signed by this activation's loaded secret.
    */
   isAuthenticated(request: ConnectionTrustRequest): boolean {
-    // local-only: disable browser auth (bound to 127.0.0.1); set DSH_LOCAL_DISABLE_AUTH=0 to re-enable
-    if ((process.env.DSH_LOCAL_DISABLE_AUTH ?? '1') === '1') return true
     const authority = requestAuthority(request.headers)
     const rawCookie = header(request.headers, 'cookie')
     if (authority === undefined || rawCookie === undefined) return false

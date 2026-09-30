@@ -228,14 +228,36 @@ describe('connection node half', () => {
     const { connection, dispose } = await mounted({ trustedHosts: ['harness.example'] })
     const loopback = fakeRequest({ host: '127.0.0.1:3080' })
     const declared = fakeRequest({ host: 'harness.example' })
+    const foreignCookie = browserCookie(connection, 'other.example')
 
     expect(connection.requestRejection(loopback)).toBe(401)
     expect(connection.requestRejection(declared)).toBe(401)
+    expect(connection.requestRejection(fakeRequest({
+      host: 'other.example', cookie: foreignCookie,
+    }))).toBe(403)
     expect(connection.requestRejection(fakeRequest({
       host: 'harness.example',
       cookie: browserCookie(connection, 'harness.example'),
     }))).toBeUndefined()
     await dispose()
+  })
+
+  it('does not let the obsolete local auth environment flag authorize API requests', async () => {
+    const previous = process.env.DSH_LOCAL_DISABLE_AUTH
+    process.env.DSH_LOCAL_DISABLE_AUTH = '1'
+    try {
+      const { connection, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+      try {
+        expect(connection.requestRejection(fakeRequest({ host: '127.0.0.1:3080' }))).toBe(401)
+        expect(connection.requestRejection(fakeRequest({ host: 'harness.example' }))).toBe(401)
+        expect(connection.requestRejection(fakeRequest({ host: 'other.example' }))).toBe(403)
+      } finally {
+        await dispose()
+      }
+    } finally {
+      if (previous === undefined) delete process.env.DSH_LOCAL_DISABLE_AUTH
+      else process.env.DSH_LOCAL_DISABLE_AUTH = previous
+    }
   })
 
   it('provides a disposable dedicated RPC channel', async () => {
