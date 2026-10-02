@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-10-02-pin-koffi-for-packed-install.md
+2026-10-02-pin-koffi-for-packed-install.md: 343a54df3ae1d8d96b42bec6190e287902b0dfdc
+2026-10-02-pin-koffi-for-packed-install.zh.md: 4474f1a753b3f62484668ed083b5fe550765cb1b
