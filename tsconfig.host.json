@@ -326,6 +326,8 @@
     { "path": "./packages/host/plugin-inventory" },
     { "path": "./packages/llm/plugin-package-inventory-deepseek" },
     { "path": "./packages/host/webserver" },
+    // The Client bundle consumes ui-voice-live's Host-emitted lib/types/index.js.
+    { "path": "./packages/client/ui-voice-live/tsconfig.host.json" },
     { "path": "./packages/sdk/client" },
     { "path": "./packages/sdk/protocol" },
     { "path": "./packages/lsp/lsp" },
